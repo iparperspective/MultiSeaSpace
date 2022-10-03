@@ -1,0 +1,474 @@
+
+
+library(tidyverse)
+require(rgdal)
+require(ggplot2)
+require(RandomFields)
+require(scales)
+library(raster) 
+require(INLA)
+
+################################################
+#### simulate extreme fish events process ####
+############################################
+
+l=sample(1:1000,1);l
+#l=c(197,581,468)
+set.seed(l[1])
+
+## define the locations:
+from <- 1
+to <- 1000
+#to <- 5
+x.seq <- seq(from,to,1)
+y.seq <- seq(from,to,1)
+# model_J1 <- RMmatern(nu=2,var=4,scale=to/2)
+# simu_J1 <- RFsimulate(model_J1, x=x.seq, y=y.seq)
+# simu_J1$variable1 = rescale(simu_J1@data$variable1,to=c(0,8))
+# spplot(simu_J1)
+# 
+# coords = cbind(coordinates(simu_J1)[,1],coordinates(simu_J1)[,2])
+# effect_common_sp1 = dgamma(simu_J1$variable1,20,1/(6/18))
+# effect_common_sp1 <- rescale(effect_common_sp1,to=c(0.1,.7))
+#plot(simu_J1$variable1,effect_common_sp1)
+
+
+xyz = data.frame(x=rep(x.seq,length(y.seq)),
+                 y=rep(y.seq,each=length(x.seq)))
+xyz$z =dnorm(xyz$x,mean = 500,sd=300)*3500
+#xyz$z = 1
+r <- rasterFromXYZ(xyz)
+#plot(r)
+
+
+## area
+x = y = from:to
+
+study_pol <- data.frame(x = c(from,to,to,from,from),
+                        y = c(from,from,to,to,from))
+s_poly = Polygon(coords=study_pol)
+s_polys = Polygons(list(s_poly),ID=1)
+study_poly = SpatialPolygons(list(s_polys))
+
+## number of balls schools
+n = 100
+r=50
+abu_scale = 100
+
+idx = sample(1:nrow(xyz),n,prob = xyz$z)
+idx = sample(1:nrow(xyz),n)
+## mean dimension and sd
+abun = mean(xyz$z[idx])*abu_scale ##  or linear predictor
+cv=.25
+sd = cv*abun
+centers = data.frame(x = xyz[idx,1],
+                     y = xyz[idx,2],
+                     size1 = rpois(n, xyz$z[idx]*abu_scale),
+                     size2 = rpois(n, rnorm(n,mean=abun,sd=sd))
+                     )
+centers$size = centers$size2
+centers$radius = (centers$size2)/r
+centers
+
+# Data
+for(i in 1:nrow(centers)){
+  if(i==1){
+    data = data.frame( x=rnorm(n=centers$size[i], centers$x[i], centers$radius[i]),
+                       y=rnorm(n=centers$size[i], centers$y[i], centers$radius[i]) )
+  }else{
+    a=data.frame( x=rnorm(n=centers$size[i], centers$x[i], centers$radius[i]),
+                  y=rnorm(n=centers$size[i], centers$y[i], centers$radius[i]) )
+    data=rbind(data,a)
+  }
+}
+
+fish_space = SpatialPoints(coords = data)
+
+
+surface =ggplot(data, aes(x=x, y=y) ) +
+  geom_bin2d(bins=500) +
+  theme_bw() + xlim(min(x),max(x)) + ylim(min(y),max(y)) 
+surface
+
+
+
+
+
+
+### simulate trawl transects
+
+### MEDITS 3knot * .5h = 1.5mile = 2778m
+### MEDITS net = 20m
+### MEDITS length/overture ratio = 140
+
+n_hauls=1000
+dist = 150
+half_width= dist / 140 ## sensible MEDITS ratio
+
+
+aaa = as.vector(over(fish_space,study_poly))
+
+tot = sum(aaa,na.rm=T)
+area_haul = dist*half_width*2
+area_study = to^2
+haul_proportion_area = area_haul/area_study
+
+
+#### mean in representative of the actual abundance
+
+for(i in 1:n_hauls){
+
+start_x=c(sample(x,1))
+start_y=c(sample(y,1))
+angles = seq(0.001,2*pi-.001,length.out = 100)
+angle=sample(angles,1)
+start_x[2]=dist*cos(angle)+start_x[1]
+start_y[2]=dist*sin(angle)+start_y[1]
+
+#### put condition change in depth no bigger than 50m for example
+# pos = SpatialPoints(cbind(start_x,start_y))
+# bathys = extract(r,pos)
+
+while(start_x[2]>max(x) | 
+      start_y[2]>max(y) | 
+      start_x[2]<min(x) | 
+      start_y[2]<min(y) ) {
+
+#start_x=c(sample(x,1))
+#start_y=c(sample(y,1))
+angles = seq(0.001,2*pi-.001,length.out = 100)
+angle=sample(angles,1)
+start_x[2]=dist*cos(angle)+start_x[1]
+start_y[2]=dist*sin(angle)+start_y[1]
+#### put condition change in depth no bigger than 50m for example
+# pos = SpatialPoints(cbind(start_x,start_y))
+# bathys = extract(r,pos)
+
+}
+
+
+
+delta_x = diff(start_x)
+delta_y = diff(start_y)
+
+n_x = half_width/(sqrt(1+(delta_x/delta_y)^2))
+n_y = - delta_x/delta_y * n_x
+
+if(delta_x>0 & delta_y>0){
+xx1 = start_x[1] + n_x*c(-1,1)
+yy1 = start_y[1] + n_y*c(-1,1)
+xx2 = start_x[2] + n_x*c(-1,1)
+yy2 = start_y[2] + n_y*c(-1,1)
+}
+
+if(delta_x>0 & delta_y<0){
+  xx1 = start_x[1] + n_x*c(-1,1)
+  yy1 = start_y[1] + n_y*c(-1,1)
+  xx2 = start_x[2] + n_x*c(-1,1)
+  yy2 = start_y[2] + n_y*c(-1,1)
+}
+
+if(delta_x<0 & delta_y<0){
+  xx1 = start_x[1] + n_x*c(-1,1)
+  yy1 = start_y[1] + n_y*c(-1,1)
+  xx2 = start_x[2] + n_x*c(-1,1)
+  yy2 = start_y[2] + n_y*c(-1,1)
+}
+
+if(delta_x<0 & delta_y>0){
+  xx1 = start_x[1] + n_x*c(1,-1)
+  yy1 = start_y[1] + n_y*c(1,-1)
+  xx2 = start_x[2] + n_x*c(1,-1)
+  yy2 = start_y[2] + n_y*c(1,-1)
+}
+
+haul <- data.frame(x = c(xx1[1],xx1[2],xx2[2],xx2[1],xx1[1]),
+                   y = c(yy1[1],yy1[2],yy2[2],yy2[1],yy1[1]))
+
+if(i==1) {hauls = list(haul)} else {hauls[[i]]=haul}
+
+surface + geom_polygon(data=haul,aes(x=x,y=y),col="red",alpha=.2)
+
+h=1
+poly = Polygon(coords=haul)
+polys = Polygons(list(poly),ID=h)
+haul_poly = SpatialPolygons(list(polys))
+
+a=as.vector(over(fish_space,haul_poly))
+
+if(i==1) catch = sum(a,na.rm=T) else catch[i] = sum(a,na.rm=T)
+if(i==1) {hauls_center = cbind(mean(haul$x[1:4]),mean(haul$y[1:4]))} else {
+  hauls_center = rbind(hauls_center,
+                       cbind(mean(haul$x[1:4]),mean(haul$y[1:4])))}
+
+#### estimate abundance
+if(i==1) estimate_abundance = mean(catch)/haul_proportion_area else estimate_abundance[i] = mean(catch)/haul_proportion_area
+
+if(i==1) estimate_med_abundance = median(catch)/haul_proportion_area else estimate_med_abundance[i] = median(catch)/haul_proportion_area
+
+
+
+
+print(i)
+}
+
+prop_zero = round(sum((catch==0))/length(catch)*100)
+prop_zero/100
+
+haul_data = data.frame(x=hauls_center[,1],y=hauls_center[,2],catch=catch,real_abu = tot, area_haul = area_haul)
+
+save(haul_data, file = paste0("C:/Users/ip30/Dropbox/Marie Curie/projects/MC objectives/extreme_data_simulation/sim_data/",paste0("haul_data",prop_zero,"%.Rdata")))
+
+
+hist(catch,breaks=100)
+hist(log(catch+.1),breaks=100)
+
+
+par(mfrow=c(2,2))
+hist(catch,breaks=100)
+plot(hauls_center)
+plot(estimate_abundance,ylim=c(0,2*tot));lines(x=c(0,10000),y=c(tot,tot),col="red")
+points(1:length(estimate_med_abundance),estimate_med_abundance,col="red",cex=.3)
+legend("topright",legend = c("Mean","Median"),col=c("black","red"),pch=16)
+hist(estimate_abundance[(i-200):i]/tot,breaks=100,xlim=c(.8,1.2))
+par(mfrow=c(1,1))
+#catch=data.frame(catch)
+
+
+mean(catch)/area_haul
+tot/area_study
+
+
+
+
+
+
+
+########################################################################################################################
+############################## Plotting  ######################################################################
+########################################################################################################################
+
+n_zero = sum((catch==0))
+plot.link="C:/Users/ip30/Dropbox/Marie Curie/projects/MC objectives/extreme_data_simulation/"
+lay <- rbind(c(1,1,1,1,1,2,2,2),
+             c(1,1,1,1,1,2,2,2),
+             c(1,1,1,1,1,3,3,3),
+             c(1,1,1,1,1,3,3,3))
+
+
+for(i in 1:n_hauls){
+map = surface + geom_polygon(data=hauls[[i]],aes(x=x,y=y),color="red",alpha=.2) + 
+  xlab("Longitude") + ylab("Latitude") + ggtitle(paste("Fish distribution and trawl number",i))
+ea1=data.frame(catch=catch[1:i])
+histo = ggplot(ea1) + geom_histogram(aes(x=catch),bins=100) +xlim(-10,max(catch)+1) + ylim(0,n_zero) + geom_vline(xintercept = catch[i], col="red")  +
+  xlab("") + ylab("Number of samples")  + ggtitle("Overall catch distribution") 
+ea2 = data.frame(estimate_abundance=estimate_abundance[1:i], haul_number = 1:i)
+est_abun = ggplot(ea2) + geom_point(aes(x=haul_number,y=estimate_abundance)) + geom_line(aes(x=haul_number,y=estimate_abundance)) + 
+  xlab("Haul Number") + ylab("Estimated abundance") +
+  geom_hline(yintercept = tot, col="red") + ylim(0,tot*2) + xlim(1,n_hauls) + ggtitle("Stock assessment")
+
+
+plots = list(map,histo,est_abun)
+
+c = gridExtra::arrangeGrob(grobs=plots,layout_matrix = lay)
+ggsave(filename = paste0(plot.link,"Sim_haul_",stringr::str_pad(i, nchar(n_hauls), pad = "0"),".png"),plot=c,width = 16,height = 8)
+print(i)
+}
+
+
+### create GIF
+library(magick)
+library(magrittr)
+
+# list.files(path=plot.link, pattern = '*.png', full.names = TRUE) %>% 
+#   image_read() %>% # reads each path file
+#   image_join() %>% # joins image
+#   image_animate(fps=10) %>% # animates, can opt for number of loops
+#   image_write("extremes_simulation.gif") # write to current dir
+
+library(gapminder)
+library(av)
+
+
+makeplot <- function(){
+  for(i in 1:n_hauls){
+    map = surface + geom_polygon(data=hauls[[i]],aes(x=x,y=y),color="red",alpha=.2) + 
+      xlab("Longitude") + ylab("Latitude") + ggtitle(paste("Fish distribution and trawl number",i))
+    ea1=data.frame(catch=catch[1:i])
+    histo = ggplot(ea1) + geom_histogram(aes(x=catch),bins=100) +xlim(-10,max(catch)+1) + ylim(0,n_zero) + geom_vline(xintercept = catch[i], col="red")  +
+      xlab("") + ylab("Number of samples")  + ggtitle("Overall catch distribution") 
+    ea2 = data.frame(estimate_abundance=estimate_abundance[1:i], haul_number = 1:i)
+    est_abun = ggplot(ea2) + geom_point(aes(x=haul_number,y=estimate_abundance)) + geom_line(aes(x=haul_number,y=estimate_abundance)) + 
+      xlab("Haul Number") + ylab("Estimated abundance") +
+      geom_hline(yintercept = tot, col="red") + ylim(0,tot*2) + xlim(1,n_hauls) + ggtitle("Stock assessment")
+    
+    
+    plots = list(map,histo,est_abun)
+    
+    gridExtra::grid.arrange(grobs=plots,layout_matrix = lay)
+    # c = gridExtra::arrangeGrob(grobs=plots,layout_matrix = lay)
+    # ggsave(filename = paste0(plot.link,"Sim_haul_",stringr::str_pad(i, nchar(n_hauls), pad = "0"),".png"),plot=c,width = 16,height = 8)
+    # print(c)
+  }
+}
+
+# Play 1 plot per sec
+video_file <- file.path("C:/Users/ip30/Desktop", 'output3.mp4')
+av::av_capture_graphics(makeplot(), video_file, 1280, 720, res = 144,framerate = 4)
+utils::browseURL(video_file)
+
+###########################################
+############## check mean if appropriate
+####### stock assessment models OK??
+##### trend OK??
+
+tot = nrow(data)
+area_haul = dist*half_width*2
+area_study = to^2
+haul_proportion_area = area_haul/area_study
+
+
+#### mean in representative of the actual abundance
+tot
+mean(catch)/haul_proportion_area
+mean(catch[which(catch<quantile(catch,.99))])/haul_proportion_area
+
+
+
+
+
+
+
+
+
+
+
+
+
+###############################################################
+##### fit model, see if predicted abundance is in line #############
+########################################################################
+haul_data = data.frame(x=hauls_center[,1],y=hauls_center[,2],catch=catch)
+
+long_dist <- max(diff(range(haul_data$x)),
+                 diff(range(haul_data$y)))
+
+max.edge <- long_dist*.05
+mesh <- inla.mesh.2d(
+  cbind(xyz$x, xyz$y), 
+  max.edge = max.edge*c(1,2),
+  cutoff = max.edge*0.3,
+  offset = max.edge*c(0.5, 3.5))
+plot(mesh, asp=1,main=mesh$n)
+
+
+####
+mesh.points = SpatialPoints(coords=mesh$loc[,1:2])
+bound=Polygon(cbind(c(from,to,to,from,from),c(from,from,to,to,from)))
+poly=SpatialPolygons(list(Polygons(list(bound),'0')))
+ea=point.in.polygon(coordinates(mesh.points)[,1], coordinates(mesh.points)[,2], 
+                    coordinates(bound)[,1], coordinates(bound)[,2], mode.checked=FALSE)
+idx.mesh=which(ea%in%c(0))
+
+
+spde <- inla.spde2.pcmatern(
+  mesh=mesh,
+  prior.range = c(200, .01),
+  prior.sigma = c(0.51, .01)) ### fix std to 1
+A <- inla.spde.make.A(
+  mesh=mesh, 
+  loc=cbind(haul_data$x, haul_data$y))
+A.pred <- inla.spde.make.A(
+  mesh=mesh)
+
+
+data_stack  <- inla.stack(
+  tag='est',
+  data=list(y=haul_data$catch), 
+  A=list(1, A),
+  effects=list(list(b0=rep(1, nrow(A)),
+                    long=haul_data$x,
+                    lat=haul_data$y), 
+               spat=1:spde$n.spde)) 
+
+pred_stack  <- inla.stack(
+  tag='pred',
+  data=list(y=rep(NA,mesh$n)), 
+  A=list(1, A.pred),
+  effects=list(list(b0=rep(1, mesh$n),
+                    long=mesh$loc[,1],
+                    lat=mesh$loc[,1]), 
+               spat=1:spde$n.spde)) 
+
+all.stack = inla.stack(data_stack,pred_stack)
+
+form <- y ~ 0 + b0 + long +  f(spat, model=spde)  
+
+
+fit_x_p <- inla(
+  form,
+  family="zeroinflatedpoisson2",
+  data=inla.stack.data(all.stack),
+  control.compute=list(waic=T,cpo=T),
+  control.predictor=list(
+    A=inla.stack.A(all.stack),
+    compute=TRUE, link=1),
+  verbose=F)
+
+fit_x_nb <- inla(
+  form,
+  family="zeroinflatednbinomial2",
+  data=inla.stack.data(all.stack),
+  control.compute=list(waic=T,cpo=T),
+  control.predictor=list(
+    A=inla.stack.A(all.stack),
+    compute=TRUE, link=1),
+  verbose=F)
+
+est_idx = inla.stack.index(all.stack,tag="est")$data
+pred_idx = inla.stack.index(all.stack,tag="pred")$data[-idx.mesh]
+
+fit_x_p$summary.hyperpar
+fit_x_nb$summary.hyperpar
+
+par(mfrow=c(1,2))
+plot(fit_x_p$summary.fitted.values$mean[est_idx],haul_data$catch)
+plot(fit_x_nb$summary.fitted.values$mean[est_idx],haul_data$catch)
+par(mfrow=c(1,1))
+
+spatial_plotdata = data.frame(pred_mean_p = fit_x_p$summary.fitted.values$mean[pred_idx],
+                              pred_mean_nb = fit_x_nb$summary.fitted.values$mean[pred_idx],
+                              spat_mean_p = fit_x_p$summary.random$spat[-idx.mesh,2],
+                              spat_mean_nb = fit_x_nb$summary.random$spat[-idx.mesh,2],
+                              x=mesh$loc[-idx.mesh,1],
+                              y=mesh$loc[-idx.mesh,2])
+
+
+spatial_plot_p = ggplot(spatial_plotdata) + geom_point(aes(x=x,y=y,color=spat_mean_p),size=3) + ggtitle("Spatial effect ZI2 Poisson") + 
+  scale_color_gradient2(low = "darkblue", high = "red") + xlim(from,to) + ylim(from,to)
+spatial_plot_nb = ggplot(spatial_plotdata) + geom_point(aes(x=x,y=y,color=spat_mean_nb),size=3) + ggtitle("Spatial effect ZI2 negative binomial") + 
+  scale_color_gradient2(low = "darkblue", high = "red") + xlim(from,to) + ylim(from,to)
+
+pred_p = ggplot(spatial_plotdata) + geom_point(aes(x=x,y=y,color=pred_mean_p),size=3) + ggtitle("Prediction ZI2 Poisson") + 
+  scale_color_gradient2(low = "darkblue", high = "red") + xlim(from,to) + ylim(from,to)
+pred_nb = ggplot(spatial_plotdata) + geom_point(aes(x=x,y=y,color=pred_mean_nb),size=3) + ggtitle("Prediction ZI2 negative binomial") + 
+  scale_color_gradient2(low = "darkblue", high = "red") + xlim(from,to) + ylim(from,to)
+
+
+plot_data = ggplot(haul_data) + geom_point(aes(x=x,y=y,color=catch),size=3) + ggtitle("Catch data") + 
+  scale_color_gradient2(low = "darkblue", high = "red") + xlim(from,to) + ylim(from,to)
+
+gridExtra::grid.arrange(spatial_plot_p,spatial_plot_nb,pred_p,pred_nb,plot_data,surface)
+
+
+
+
+
+
+
+
+
+
+
+
+
