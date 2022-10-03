@@ -1,0 +1,222 @@
+
+require(INLA)
+require(rgdal)
+require(ggplot2)
+
+### Load data #### 
+n=100
+idx=c()
+for(i in 1:k){idx=c(idx,(i-1)*length(lon)+sample(1:length(lon),n))}
+sample_data = data[idx,]
+## to do space-time models in INLA we need to be indexed starting from 1
+sample_data$year2=sample_data$year-min(sample_data$year)+1
+
+#### To work with geostatistics it is more robust to use UTM (lat/long in same magnitude)
+cord <- SpatialPoints(sample_data[, 2:3], proj4string=CRS(""))
+
+coords<-as.matrix(sample_data[,c("long","lat")])# UTM COORDS
+
+#### Create mesh #####
+D <- dist(coords)
+par(mfrow = c(1,2))
+hist(D, freq = TRUE,main = "", xlab = "Dist. between sites (km)", ylab = "Frequency")
+plot(x = sort(D), 
+     y = (1:length(D))/length(D), 
+     type = "l",
+     xlab = "Dist. sites (km)",
+     ylab = "Cumulative proportion")
+
+## the outer area of the mesh should be at least as wide as the estimated range to avoid edge effects.
+# We cannot know the actual range of the matern field before fitting, therefore we may need to refine the mesh after we fit our model
+long_dist=max(diff(range(sample_data$long)),
+              diff(range(sample_data$lat)))
+
+max.edge = long_dist*.05
+bound.outer = .3
+mesh = inla.mesh.2d(loc.domain = cbind(c(0,10,10,0,0),c(0,0,10,10,0)),
+                    max.edge = c(1,5)*max.edge,
+                    cutoff = .02,
+                    offset = c(max.edge, -bound.outer))
+
+plot(mesh,main=paste("# knots =",mesh$n));points(coords)
+mesh.locs=SpatialPoints(coords=mesh$loc[,1:2],
+                        proj4string=CRS(""))
+
+#### extract covariate in mesh nodes
+
+## in order to fit non-linear RW2 effects in INLA, the easiest way is to create knots using the inla.group() function
+# these knots need to be the same in the estimation and prediction data. Therefore:
+covariate_model = c(sample_data$covariate,over(mesh.locs,covariate_space)$variable1)
+covariate_model=inla.group(covariate_model,n=30)
+
+sample_data$covariate_model=covariate_model[1:length(sample_data[,1])]
+
+
+
+
+
+##################
+#### PRIORS #####
+################
+
+## set non-linear RW2 effect and geostatistical priors
+# check https://becarioprecario.bitbucket.io/inla-gitbook/ to better understand how to set these priors
+presence=which(sample_data$abundance>0)
+prior_bin= list(theta = list(prior="pc.prec", param=c(.5,0.01)))
+prior_con= list(theta = list(prior="pc.prec", param=c(sd(log(sample_data$abundance[presence])),0.01)))
+spde_con <- inla.spde2.pcmatern(mesh, prior.range=c(150, 0.15), prior.sigma=c(1, 0.2))
+spde_bin <- inla.spde2.pcmatern(mesh, prior.range=c(150, 0.15), prior.sigma=c(1, 0.2))
+
+
+##############################################
+####### SPATIOTEMPORAL  MODELLING ###########
+###############################################
+
+### index the spatiotemporal SPDEs ###
+## Occurrence
+mesh.index.occur<- inla.spde.make.index("i.bin", n.spde=spde_bin$n.spde, n.group=length(unique(sample_data$year2)))
+
+occur.temp <- inla.spde.make.A(mesh, loc=coords,
+                             group =sample_data$year2,
+                             n.group=length(unique(sample_data$year2)))
+
+
+
+joint.occur.prog<-inla.stack(data=list(y=cbind(sample_data$occur,NA)),
+                             A=list(occur.temp, 1),
+                             effects=list(mesh.index.occur,
+                                          list(occur.b0=1,
+                                               occur.covar=sample_data$covariate_model,
+                                               occur.year=sample_data$year)),
+                             tag='est_occur')
+
+## conditional to presence abundance
+mesh.index.abund<- inla.spde.make.index("i.con", n.spde=spde_con$n.spde, n.group=length(unique(sample_data$year2)))
+abund.temp <- inla.spde.make.A(mesh, loc=coords,
+                               group=sample_data$year2,
+                               n.group=length(unique(sample_data$year2)))
+
+# set NA to absences so that they are not taken into account in the abundance model
+joint.est.abundance.prog<-inla.stack(data=list(y=cbind(NA,ifelse(sample_data$abundance>0,sample_data$abundance,NA))),
+                                   A=list(abund.temp, 1),
+                                   effects=list(mesh.index.abund,
+                                                list(abundance.b0=1,
+                                                     abundance.covar=sample_data$covariate_model,
+                                                     abundance.year=sample_data$year)),
+                                   tag='est_abundance')
+
+# join together the occurrence and conditional-to-presence data to fit joint environmental effects
+stack.complete<-inla.stack(joint.occur.prog,joint.est.abundance.prog)
+
+# formula
+joint_form<-y~-1+abundance.b0 +occur.b0 + ## set intercepts of the model
+  ## fit joint bathymetric effects. Fixed = FALSE allows for differences in scale between the occurrence and abundance linear predictors
+  f(occur.covar,model="rw2",hyper = prior_bin)+  f(abundance.covar,copy="occur.covar",fixed=F)+
+  ## fit joint temporal trends. Fixed = FALSE allows for differences in scale between the occurrence and abundance linear predictors
+  f(occur.year,model="rw2",hyper = prior_bin)+  f(abundance.year,copy="occur.year",fixed=F)+
+  ## fit independent SPDE X AR1 models
+  f(i.bin,model=spde_bin,group = i.bin.group,control.group = list(model="ar1"))+
+  f(i.con,model=spde_con,group = i.con.group,control.group = list(model="ar1")) 
+
+##### fit the model in INLA
+ci <- list(strategy = "adaptive", ## faster
+           int.strategy = 'eb') ## faster
+joint_fit<-inla(joint_form, ### this is our formula
+                family=c('binomial',"gamma"),  ### put your likelihoods here
+                data=inla.stack.data(stack.complete), control.compute=list(config=T), ## use config=T if we are going to do manual prediction
+                control.predictor=list(A=inla.stack.A(stack.complete), compute=TRUE),
+                verbose=T,num.threads=2,control.inla = ci)
+### carefully check the convergence of the model
+
+#####################################################
+######### work with results and do predictions ##########
+#####################################################
+# load("C:/Users/ip30/Documents/Resultados/z_plotting/mesh.Rdata")
+# load("C:/Users/ip30/Dropbox/servidor/atlas/data/merluccius/juv/joint_prof.fit.Rdata")
+# joint_fit= joint_prof.fit
+
+##### temporal trend
+year_effect=joint_fit$summary.random$abundance.year
+year_effect=year_effect[,c(1,2,4,6)] %>% gather(key,value,mean:'0.975quant')
+ggplot(year_effect)+geom_line(aes(x=ID,y=value,linetype=key))
+
+##### bathymetric effect
+covariate_effect=joint_fit$summary.random$abundance.covar
+covariate_effect=covariate_effect[,c(1,2,4,6)] %>% gather(key,value,mean:'0.975quant')
+ggplot(covariate_effect)+geom_line(aes(x=ID,y=value,linetype=key))
+
+##### spatiotemporal effects 
+## abundance
+abundance_spatial_effect=data.frame(mean = joint_fit$summary.random$i.con$mean,
+                                    x=rep(mesh$loc[,1],length(unique(sample_data$year))),
+                                    y=rep(mesh$loc[,2],length(unique(sample_data$year))),
+                                    year=rep(1:length(unique(sample_data$year)),each=mesh$n))
+ggplot(abundance_spatial_effect) + geom_point(aes(x=x,y=y,color=mean),size=2) + facet_wrap(~year)
+
+## occurrence
+occurrence_spatial_effect=data.frame(mean = joint_fit$summary.random$i.bin$mean,
+                                    x=rep(mesh$loc[,1],length(unique(sample_data$year))),
+                                    y=rep(mesh$loc[,2],length(unique(sample_data$year))),
+                                    year=rep(1:length(unique(sample_data$year)),each=mesh$n))
+ggplot(occurrence_spatial_effect) + geom_point(aes(x=x,y=y,color=mean),size=2) + facet_wrap(~year)
+
+
+##### level of spatiotemporal persistence ####
+
+### normally, the level of persistence is higher in the occurrence than in the abundance. 
+## We tend to use the rho parameter of the abundance modlels as a reference
+# conditional-to-presence abundance spatiotemporal model rho
+joint_fit$summary.hyperpar["GroupRho for i.con",]
+# occurrence spatiotemporal model rho
+joint_fit$summary.hyperpar["GroupRho for i.bin",]
+
+
+
+#####################################################
+############### Do prediction ####################
+######################################################
+
+#### prediction can be done including new NA data points in those locations in space and time where we want to predict
+### this approach requires fitting the model again and it is quite computationally expensive
+## another way is to use inla.posterior.sample() over the already fitted model and add the linear predictor manually, detransform the link
+# function and get the results (this approach will inevitably add some random error)
+
+pred.temp= inla.spde.make.A(mesh,
+                            index=rep(1:mesh$n, times=k),
+                             group=rep(1:k, each=mesh$n),
+                             n.group=k)
+
+joint.occur.pred<-inla.stack(data=list(y=cbind(rep(NA,mesh$n*length(unique(sample_data$year))),rep(NA,mesh$n*length(unique(sample_data$year))))),
+                             A=list(pred.temp, 1),
+                             effects=list(mesh.index.occur,
+                                          list(occur.b0=1,
+                                               occur.covar=rep(covariate_model[(1+nrow(sample_data)):length(covariate_model)],length(unique(sample_data$year))),
+                                               occur.year=rep(1:length(unique(sample_data$year)),each=mesh$n))),
+                             tag='pred_occur')
+
+joint.abund.pred<-inla.stack(data=list(y=cbind(rep(NA,mesh$n*length(unique(sample_data$year))),rep(NA,mesh$n*length(unique(sample_data$year))))),
+                             A=list(pred.temp, 1),
+                             effects=list(mesh.index.abund,
+                                          list(abundance.b0=1,
+                                               abundance.covar=rep(covariate_model[(1+nrow(sample_data)):length(covariate_model)],length(unique(sample_data$year))),
+                                               abundance.year=rep(1:length(unique(sample_data$year)),each=mesh$n))),
+                             tag='pred_abund')
+
+stack.complete.pred<-inla.stack(joint.occur.prog,joint.est.abundance.prog,joint.occur.pred,joint.abund.pred)
+
+ci <- list(strategy = "adaptive", ## faster
+           int.strategy = 'eb') ## faster
+joint_fit_pred<-inla(joint_form, ### this is our formula
+                family=c('binomial',"gamma"),  ### put your likelihoods here
+                data=inla.stack.data(stack.complete.pred), control.compute=list(config=T), ## use config=T if we are going to do manual prediction
+                control.predictor=list(A=inla.stack.A(stack.complete.pred), compute=TRUE),
+                verbose=T,num.threads=2,control.inla = ci)
+
+
+
+###### extract fitted values ######
+idx_occur_pred = inla.stack.index(stack.complete.pred,tag="pred_occur")
+idx_abund_pred = inla.stack.index(stack.complete.pred,tag="pred_abund")
+
+abund_pred = joint_fit_pred$summary.fitted.values[idx_abund_pred,]
+occur_pred = joint_fit_pred$summary.fitted.values[idx_occur_pred,]
