@@ -1,0 +1,437 @@
+
+
+####################################
+##### Simulate 3D Point Pattern ###
+####################################
+
+
+library(scales)
+library(tidyverse)
+library(INLA)
+library(gridExtra)
+library(RandomFields)
+library(raster)
+
+inv.logit = function(x){exp(x)/(1+exp(x))}
+
+from <- 1
+to_y <- 400
+to_x <- 400
+to_z <- 100
+
+x.seq <- seq(from,to_x,1)
+y.seq <- seq(from,to_y,1)
+z.seq <- seq(0,to_z,1)
+
+
+### bathymetric profile
+bathy_profile = round(rescale(x.seq^2.5,to=c(1,to_z)) )## same in Y axis
+plot(x.seq,-bathy_profile)
+
+
+l <- list(x = x.seq,
+          y = y.seq,
+          z = z.seq)
+data = do.call(expand.grid, l)
+
+data = data %>% mutate(bathy_profile =rescale(x^2.5,to=c(1,to_z)))
+
+bathy_groups = round(seq(min(data$bathy_profile),max(data$bathy_profile),length.out=25))
+
+data$bathy_profile = sapply(data$bathy_profile,function(x){bathy_groups[which.min(abs(bathy_groups - x))]})
+
+### remove points were distance to bathy are not possible + calculate distance to bottom
+data = data %>% group_by(x,y) %>% 
+  filter(bathy_profile-z>=0) %>% mutate(dist_to_bottom = bathy_profile-z)
+
+dist_to_bottom_groups = round(seq(min(data$dist_to_bottom),max(data$dist_to_bottom),length.out=25))
+data$dist_to_bottom = sapply(data$dist_to_bottom,function(x){bathy_groups[which.min(abs(dist_to_bottom_groups - x))]})
+
+#ggplot(data)+geom_point(aes(x=x,y=y,color=bathy_profile))
+
+#################################
+##### effects in predictor ######
+################################
+
+#####################
+### bathy effect
+bathy_profile = unique(bathy_profile)
+bathy_effect = dgamma(bathy_profile,to_z/4,0.4) ## simulate non-linear relationshiof the covariate
+bathy_effect <- rescale(bathy_effect,to=c(-1,1))
+plot(bathy_profile,bathy_effect)
+
+## inlcude the effect of bathy
+bathy_eff_data = data.frame(bathy_profile=bathy_profile,
+                            bathy_effect=bathy_effect)
+
+
+data = data %>% ungroup() %>% inner_join(bathy_eff_data)
+
+#######################
+### spatial effect
+yticks <- seq(-3, 3, length=to_y)
+xticks <-seq(-3, 3, length=to_x)
+side <- diff(yticks[1:2])  # side length of squares
+sigma <- diag(2)               # standard devs. for f2
+mu <- c(0,0)                # means
+
+## Using pnorm
+f <- Vectorize(function(x, y, side, mu1, mu2, s1, s2)
+  diff(pnorm(x+c(-1,1)*side/2, mu1, s1)) * diff(pnorm(y+c(-1,1)*side/2, mu2, s2)),
+  vec=c("x", "y"))
+
+## get prob. of squares, mu are means, s are standards devs.
+mat <- outer(xticks, yticks, f, side=side, mu1=0, mu2=0, s1=1,s2=1)
+mat =  rescale(mat,to=c(-1,1))
+space <-raster(
+  mat,
+  xmn=1, xmx=to_x,
+  ymn=1, ymx=to_y
+)
+
+plot(space)
+space_effect = space@data@values
+
+lon=coordinates(space)[,1]
+lat=coordinates(space)[,2]
+
+## inlcude the effect of space
+spatial_eff_data = data.frame(x=round(lon),
+                              y=round(lat),
+                              spatial_effect=space_effect)
+data = data %>% left_join(spatial_eff_data, by=c("x","y"))
+
+########################################
+#### Distance to the bottom effect
+dist_bottom_effect = dgamma(z.seq,4,0.15) ## simulate non-linear relationship the covariate
+plot(z.seq,dist_bottom_effect)
+lines(x=rep(20,2),y=c(0,10000)) ### max at 20m above bottom
+
+## inlcude the effect of dist to bottom
+data$dist_bottom_effect=rescale(dgamma(data$dist_to_bottom,4,0.15),to = c(-1.5,1.5))
+
+
+
+
+data = data %>% mutate(predictor= bathy_effect + spatial_effect + dist_bottom_effect,
+                       lambda = exp(predictor),
+                       prob = inv.logit(predictor))
+## NAs in probability = 0
+data$prob[is.na(data$prob)] = 0
+data$lambda[is.na(data$lambda)] = 0
+  
+############################
+##### simulate survey #########
+#########################
+degrees = 7
+y_samp = round(seq(from,to_y,length.out = 7))[2:6]
+x_samp = seq(5,to_x-5,1)
+z_samp = from:to_z
+cone_ampl = round(tan(degrees/2*pi/180)*z_samp) ## kateto opuesto * 2 
+
+l.samp <- list(x = x_samp,
+               y = y_samp,
+               z = z_samp)
+sample = do.call(expand.grid, l.samp)
+
+
+sample_xyz = 
+
+
+
+
+
+
+
+
+
+
+
+
+################
+#### 3D plot ###
+###############
+require(plotly)
+
+# fig <- plot_ly(data[idx,], x = ~x, y = ~y, z = ~-z,size = .1)
+# fig
+
+
+
+############################
+##### simulate survey #########
+#########################
+degrees = 7
+y_samp = round(seq(from,to_y,length.out = 7))[2:6]
+x_samp = seq(5,to_x-5,1)
+z_samp = from:to_z
+cone_ampl = round(tan(degrees/2*pi/180)*z_samp) ## kateto opuesto * 2
+
+
+l.samp <- list(x = x_samp,
+               y = y_samp,
+               z = z_samp)
+sample = do.call(expand.grid, l.samp)
+
+### which samples are in data (bathy in)
+sample = data%>%select(x,y,z)%>%inner_join(sample)
+
+
+
+#sample$cone_ampl = round(tan(degrees*pi/180)*sample$z)
+#hist(sample$cone_ampl )
+
+#####################################
+#### calculate cone amplitude ####
+options(dplyr.summarise.inform = FALSE)
+for(i in 1:nrow(sample)){
+  samp_loc = sample %>%select(x,y,z) %>% slice(i)
+  
+  
+  #samp_vert = data %>%inner_join(samp_loc) %>% mutate(cone_ampl = round(tan(degrees*pi/180)*z)) %>% 
+  # filter(!is.na(z))
+  
+  samp_cone = samp_loc %>% group_by(x,y,z) %>% 
+    mutate(cone_ampl = round(tan(degrees*pi/180)*z)*2) %>% 
+    summarise(x=x, z=z, y=(y-cone_ampl/2):(y+cone_ampl/2),cone_ampl) %>% 
+    ungroup()
+  
+  
+  ## if sample in real database, do the summary, else do not inlcude that row
+  ### only necessary if bathymetry is not identical in Y axis
+  #if(nrow(suppressMessages(inner_join(samp_cone,data)))>0){
+  
+  extra = suppressMessages(data %>% select(x,y,z,presence) %>% right_join(samp_cone) %>% summarise(abundance = sum(presence,na.rm=T),
+                                                                                                   cone_ampl=unique(cone_ampl)) )
+  
+  samp_loc = cbind(samp_loc,extra)
+  
+  if(i==1){
+    full_sample = samp_loc
+  }else{
+    full_sample = rbind(full_sample,samp_loc)
+  }
+  
+  #}
+  
+  #data%>%filter(x%in%samp_cone$x,y%in%samp_cone$y)
+  
+  
+  if(i/1000 == round(i/1000)){print(paste("Sample",i))}
+}
+
+### put offset correctly
+full_sample$cone_ampl = full_sample$cone_ampl + 1 
+### include bathy profile
+full_sample = data%>%select(x,y,z,bathy_profile,dist_to_bottom) %>% right_join(full_sample)
+str(full_sample)
+
+save(full_sample,file = "C:/Users/ip30/Dropbox (Personal)/Marie Curie/projects/MC objectives/INLABRU/Fish acosutic/Simulations/Spatial/full_sample.Rdata")
+
+############################
+##### MODEL #########
+#########################
+
+
+### create mesh 
+long_dist=max(diff(range(full_sample$x)),
+              diff(range(full_sample$y)))
+boundary = inla.nonconvex.hull(cbind(full_sample$x,full_sample$y),convex = -.2)
+
+max.edge = long_dist*.05
+bound.outer = .2
+mesh = inla.mesh.2d(boundary = boundary,
+                    #loc=cbind(data$x, data$locy),
+                    max.edge = c(1,3)*max.edge,
+                    cutoff = 0.08,
+                    offset = c(max.edge, -bound.outer))
+
+plot(mesh, lwd=0.5,main=mesh$n)
+#plot(land,add=T,col="grey",xlim=c())
+points(full_sample$x, full_sample$y,col="red")
+mesh$n
+
+
+### SPDE
+A.spde <- inla.spde.make.A(mesh, loc=matrix(c(full_sample$x,full_sample$y),ncol=2))
+spde <- inla.spde2.pcmatern(mesh, prior.range=c(long_dist/5, 0.5), prior.sigma=c(1, 0.2))
+
+
+## stack 
+survey_stack<-inla.stack(data=list(y=full_sample$abundance),
+                         A=list(A.spde, 1),
+                         effects=list(spat = 1:spde$n.spde,
+                                      list(b0=1,
+                                           bathy_profile=full_sample$bathy_profile,
+                                           depth=full_sample$z,
+                                           dist_to_bottom =full_sample$dist_to_bottom,
+                                           offset=full_sample$cone_ampl)),
+                         tag='est')
+
+prior_rw2= list(theta = list(prior="pc.prec", param=c(10,0.01),initial=9))
+
+formula_rw2 = y ~ -1 + b0 + f(bathy_profile,model="rw2") + f(dist_to_bottom,model="rw2") + offset(log(offset))
+
+
+model_rw2 = inla(formula = formula_rw2,
+                 family=c("poisson"),
+                 control.inla = list(strategy = "simplified.laplace"),
+                 data=inla.stack.data(survey_stack), control.compute=list(waic=F,cpo=F,config=F),
+                 control.predictor=list(A=inla.stack.A(survey_stack), compute=TRUE,link=1),
+                 #control.fixed = list(expand.factor.strategy = "inla"),
+                 verbose=F,num.threads = 2)
+model_rw2$internal.summary.hyperpar
+plot(model_rw2)
+
+
+formula_all = y ~ -1 + b0 +  f(bathy_profile,model="rw2",initial=model_rw2$internal.summary.hyperpar[1,1]) + 
+  f(spat,model=spde) + 
+  f(dist_to_bottom,model="rw2",initial=model_rw2$internal.summary.hyperpar[2,1]) + 
+  offset(log(offset))
+
+model_all = inla(formula = formula_all,
+                 family=c("poisson"),
+                 control.inla = list(strategy = "simplified.laplace"),
+                 data=inla.stack.data(survey_stack), control.compute=list(waic=F,cpo=F,config=F),
+                 control.predictor=list(A=inla.stack.A(survey_stack), compute=TRUE,link=1),
+                 #control.fixed = list(expand.factor.strategy = "inla"),
+                 verbose=F,num.threads = 2)
+
+model_all_config = inla(formula = formula_all,
+                        family=c("poisson"),
+                        control.inla = list(strategy = "simplified.laplace"),
+                        data=inla.stack.data(survey_stack), control.compute=list(waic=F,cpo=F,config=T),
+                        control.predictor=list(A=inla.stack.A(survey_stack), compute=TRUE,link=1),
+                        #control.fixed = list(expand.factor.strategy = "inla"),
+                        verbose=F,num.threads = 2)
+
+#######################
+##### prediction #####
+#####################
+
+### put offset = 1
+
+A.pred <- inla.spde.make.A(mesh, loc=matrix(c(data$x,data$y),ncol=2))
+
+pred_stack<-inla.stack(data=list(y=rep(NA,nrow(data))),
+                       A=list(A.pred, 1),
+                       effects=list(spat = 1:spde$n.spde,
+                                    list(b0=1,
+                                         bathy_profile=data$bathy_profile,
+                                         #depth=data$z,
+                                         dist_to_bottom = data$dist_to_bottom,
+                                         offset=1)),
+                       tag='pred')
+
+
+stack_all <- inla.stack(survey_stack,pred_stack)
+
+
+pred.model = inla(formula = formula_all,
+                  family=c("poisson"),
+                  control.inla = list(strategy = "simplified.laplace"),
+                  data=inla.stack.data(stack_all), control.compute=list(waic=F,cpo=F,config=F),
+                  control.predictor=list(A=inla.stack.A(stack_all), compute=TRUE,link=1),
+                  #control.fixed = list(expand.factor.strategy = "inla"),
+                  verbose=F,num.threads = 2, control.mode = list(restart = TRUE,
+                                                                 theta = model_all$mode$theta))
+##################
+### by hand ####
+###############
+
+contents = model_all_config$misc$configs$contents
+result = inla.posterior.sample(n=1000,model_all_config)
+
+##### Intercept
+idx_Intercept=which(contents$tag=="b0")
+Intercept=lapply(result,function(x)x$latent[idx_Intercept])
+Intercept=matrix(unlist(Intercept),ncol=1,byrow=T)
+
+###### bathy_profile
+idx_bathy_profile=which(contents$tag=="bathy_profile")
+idx_bathy_profile=contents$start[idx_bathy_profile]:(contents$start[idx_bathy_profile]+contents$length[idx_bathy_profile]-1)
+bathy_profile = lapply(result, function(x) x$latent[idx_bathy_profile])
+bathy_profile = matrix(unlist(bathy_profile), ncol = length(idx_bathy_profile), byrow = T)
+
+###### dist_to_bottom
+idx_dist_to_bottom=which(contents$tag=="dist_to_bottom")
+idx_dist_to_bottom=contents$start[idx_dist_to_bottom]:(contents$start[idx_dist_to_bottom]+contents$length[idx_dist_to_bottom]-1)
+dist_to_bottom = lapply(result, function(x) x$latent[idx_dist_to_bottom])
+dist_to_bottom = matrix(unlist(dist_to_bottom), ncol = length(idx_dist_to_bottom), byrow = T)
+
+####### spatial
+idx_spat=which(contents$tag=="spat")
+idx_spat=contents$start[idx_spat]:(contents$start[idx_spat]+contents$length[idx_spat]-1)
+spat = lapply(result, function(x) x$latent[idx_spat])
+spat = matrix(unlist(spat), ncol = length(idx_spat), byrow = T)
+
+######
+model_dist_to_bottom = model_all_config$summary.random$dist_to_bottom$ID
+model_bathy_profile = model_all_config$summary.random$bathy_profile$ID
+model_spat = model_all_config$summary.random$spat$ID
+
+#### prediction data 
+data_2D = data %>% group_by(x,y) %>% summarise(count = sum(presence),
+                                               predictor_sum = sum(predictor),
+                                               prob_sum = sum(prob),
+                                               bathy_profile=unique(bathy_profile))
+
+library(raster)
+data_2D_raster <- rasterFromXYZ(data_2D)
+
+pred_data = data.frame(x=mesh$loc[,1],y=mesh$loc[,2],spat.i = 1:mesh$n)
+pred_data= cbind(pred_data,extract(data_2D_raster,cbind(mesh$loc[,1],mesh$loc[,2])))
+pred_data$bathy_profile[is.na(pred_data$bathy_profile)]=-1
+pred_data_all = pred_data %>%group_by(x,y,spat.i,bathy_profile)%>%summarise(dist_to_bottom =bathy_profile-(0:bathy_profile))%>%ungroup() 
+pred_data_all$bathy_profile[pred_data_all$bathy_profile==-1]=NA
+pred_data_all$dist_to_bottom[pred_data_all$dist_to_bottom==-1]=NA
+pred_data_all%>%filter(!is.na(bathy_profile ))
+
+bathy_profile.idx=c()
+for(i in 1:nrow(pred_data_all)){
+  if(is.na(pred_data_all$bathy_profile[i])){bathy_profile.idx[i]=NA}else{
+    bathy_profile.idx[i]=which.min(abs(model_bathy_profile-pred_data_all$bathy_profile[i]))
+  }  
+}
+
+dist_to_bottom.idx=c()
+for(i in 1:nrow(pred_data_all)){
+  if(is.na(pred_data_all$dist_to_bottom[i])){dist_to_bottom.idx[i]=NA}else{
+    dist_to_bottom.idx[i]=which.min(abs(model_dist_to_bottom-pred_data_all$dist_to_bottom[i]))
+  }  
+}
+
+spat.idx=c()
+for(i in 1:nrow(pred_data_all)){
+  spat.idx[i]=which.min(abs(model_spat-pred_data_all$spat.i[i]))
+}
+
+##### predict #####
+prediction_list=list()
+for(i in 1:nrow(pred_data_all)){
+  ## log-link (poisson)
+  if(is.na(dist_to_bottom.idx[i])){ prediction_list[[i]]=NA}else{
+    prediction_list[[i]]= exp( Intercept[,1] + 
+                                 dist_to_bottom[,dist_to_bottom.idx[i]] + 
+                                 bathy_profile[,bathy_profile.idx[i]] +
+                                 spat[,spat.idx[i]])
+  }
+  if(i/1000 == round(i/1000)){print(paste("pred",i))}
+}
+
+mean = unlist(lapply(prediction_list,FUN=mean))
+q025 = unlist(lapply(prediction_list,FUN=function(x){quantile(x,probs=.025,na.rm=T)}))
+q975 = unlist(lapply(prediction_list,FUN=function(x){quantile(x,probs=.975,na.rm=T)}))
+
+pred_data_all$mean=mean
+pred_data_all$q025=q025
+pred_data_all$q975=q975
+
+
+pred_model_2D = pred_data_all %>%group_by(x,y,bathy_profile)%>%summarise(pred_sum_mean = sum(mean))
+
+ggplot(pred_model_2D) + geom_point(aes(x=x,y=y,color=scale(pred_sum_mean)),size=4) +
+  xlim(0,to_x) + ylim(0,to_y)
+
+ggplot(pred_data) + geom_point(aes(x=x,y=y,color=scale(prob_sum)),size=4) +
+  xlim(0,to_x) + ylim(0,to_y)
