@@ -1,0 +1,85 @@
+
+
+library(INLA)
+library(ggplot2)
+library(dplyr)
+library(reshape2)
+require(scales)
+require(RandomFields)
+
+
+
+####################################
+### set spatial structure #####
+##################################
+from <- 0
+to <- 10
+#to <- 5
+x.seq <- seq(from, to, length=31) 
+y.seq <- seq(from, to, length=31)
+
+#################################
+##### non-linear covariate ######
+################################
+model_J2 <-   RMmatern(nu=1,var=2,scale=12)
+covariate_space <- RFsimulate(model_J2, x=x.seq, y=y.seq)
+
+lon=coordinates(covariate_space)[,1]
+lat=coordinates(covariate_space)[,2]
+
+common = rescale(covariate_space@data$variable1,to=c(0,8))
+covariate_space$variable1=common
+## sp1
+covar_effect = dgamma(common,20,1/(6/18))
+covar_effect <- rescale(covar_effect,to=c(-2,2))
+
+#################################
+##### temporal trend ######
+################################
+temp_trend = c(1,1.2,1.4,1.5,1.45,1.3,1.2,1.25,1.1,0.9,.8,.7)
+
+
+
+##################################################
+####### create independent yerly maps ########
+#################################################
+semi_cont=0
+while(length(which(semi_cont==0))/length(semi_cont)>.4 | length(which(semi_cont==0))/length(semi_cont)<.15){   ### make sure we dont have too many zeros
+model_J1 <-   RMmatern(nu=1,var=4,scale=20)
+k=12
+x.k = matrix(NA,nrow=length(lon),ncol=k)
+for(i in 1:k){
+simu_J1 <- RFsimulate(model_J1, x=x.seq, y=y.seq)
+obs =  covar_effect + simu_J1$variable1 +rnorm(n=length(lon),sd=.3) #+temp_trend[i]
+x.k[,i] = obs
+}
+
+apply(x.k,2,mean)
+
+rho = 0.9  # degree of temporal autocorrelation
+x <- x.k
+
+for (j in 2:k) x[, j] <- rho * x[, j - 1] + sqrt(1 - rho^2) * x.k[, j]
+
+x <- data.frame(x) %>% melt()
+head(x)
+semi_cont = x$value-min(x$value)+.001 ### obtain left skew probabilities of zero observations
+prob = sqrt(semi_cont)-min(sqrt(semi_cont))
+prob = prob/max(prob)
+semi_cont = semi_cont*rbinom(n = length(prob), size = 1, prob = prob)
+}
+
+coords = cbind(coordinates(simu_J1)[,1],coordinates(simu_J1)[,2])
+
+data <- Reduce("rbind", lapply(1:k, function(x) data.frame(year = x, coords)))
+names(data)[2:3]=c("lat","long")
+data$abundance = semi_cont
+data$occurrence = ifelse(semi_cont==0,0,1)
+data$covariate = rep(common,k)
+# head(data)
+# data %>% group_by(Year) %>% summarise(sd(abundance),
+#                                            quantile(abundance,prob=.25),
+#                                            quantile(abundance,prob=.5),
+#                                            quantile(abundance,prob=.75))
+
+ggplot(data, aes(y = lat, x = long)) + geom_point(aes(color = abundance,shape=as.character(occurrence)),size=2) + facet_wrap(~year)
