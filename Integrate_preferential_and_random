@@ -1,0 +1,299 @@
+
+library(INLA)
+library(scales)
+library(raster)
+library(tidyverse)
+library(gridExtra)
+library(patchwork)
+
+dims = 101
+mat = matrix(1,ncol=dims,nrow=dims)
+
+
+##########################
+##### sptial field #####
+######################
+yticks <- xticks <-seq(-3, 3, length=dims)
+side <- diff(yticks[1:2])  # side length of squares
+sigma <- diag(2)               # standard devs. for f2
+mu <- c(0,0)                # means
+
+## Using pnorm
+f <- Vectorize(function(x, y, side, mu1, mu2, s1, s2)
+  diff(pnorm(x+c(-1,1)*side/2, mu1, s1)) * diff(pnorm(y+c(-1,1)*side/2, mu2, s2)),
+  vec=c("x", "y"))
+
+## get prob. of squares, mu are means, s are standards devs.
+mat <- outer(xticks, yticks, f, side=side, mu1=0, mu2=0, s1=1,s2=1)
+mat =  rescale(mat,to=c(-1,1))
+space <-raster(
+  mat,
+  xmn=1, xmx=dims,
+  ymn=1, ymx=dims
+)
+
+plot(space)
+space_effect = space@data@values
+
+lon=coordinates(space)[,1]
+lat=coordinates(space)[,2]
+
+###############################
+### Covariate ######
+min_Cov=0;max_Cov=30
+Cov_profile = round(rescale(lon^2.5,to=c(min_Cov,max_Cov)) )+1## same in Y axis
+effect_Cov =  dnorm(Cov_profile,10,4)
+effect_Cov <- rescale(effect_Cov,to=c(-1.5,1.5))
+plot(Cov_profile,effect_Cov)
+
+
+
+#########################
+##### create dataset ####
+##########################
+
+scale2 = .5
+scale3 = .8
+n = dims^2
+
+#### Gaussian data
+intercept = 8
+mu = intercept+  
+  effect_Cov + space_effect
+
+obs_prec = .5
+y = rnorm(n, mean = mu, sd = sqrt(1/obs_prec))
+hist(y)
+
+
+all_data = data.frame(mean_biomass=mu,
+                      obs_biomass=y,
+                      lon=lon,
+                      lat=lat,
+                      space=space_effect
+                      #y=d1$y
+)
+
+aa = ggplot(all_data) + geom_raster(aes(x=lon,y=lat,fill=obs_biomass)) + scale_fill_gradient2(low="blue",mid="black",high = "red")
+
+#############################
+##### Independent survey ###
+#############################
+n=30
+
+indep_idx = sample(1:nrow(all_data),n)
+dep_idx = sample(1:nrow(all_data),n,prob=exp(mu)) ## preferential over mean
+dep_idx_50 = sample(dep_idx,round(n*.5),prob=exp(mu[dep_idx])) ## preferential over mean
+dep_idx_33 = sample(dep_idx,round(n*.33),prob=exp(mu[dep_idx])) ## preferential over mean
+dep_idx_10 = sample(dep_idx,round(n*.1),prob=exp(mu[dep_idx])) ## preferential over mean
+
+
+#### mesh
+max.edge = dims*.05
+bound.outer = .3
+mesh = inla.mesh.2d(loc.domain = cbind(c(0,dims,dims,0,0),c(0,0,dims,dims,0)),
+                    #loc=cbind(sample_data$km_utm.x, sample_data$km_utm.y),
+                    max.edge = c(.75,5)*max.edge,
+                    cutoff = .5,
+                    offset = c(max.edge, -bound.outer))
+
+
+####### spatial field structure
+spde  = inla.spde2.pcmatern(mesh, prior.range = c(20,.5), prior.sigma = c(1,.01))
+
+
+d_indep=cbind(all_data$lon[indep_idx],all_data$lat[indep_idx])
+d_dep=cbind(all_data$lon[dep_idx],all_data$lat[dep_idx])
+d_dep_50=cbind(all_data$lon[dep_idx_50],all_data$lat[dep_idx_50])
+d_dep_33=cbind(all_data$lon[dep_idx_33],all_data$lat[dep_idx_33])
+d_dep_10=cbind(all_data$lon[dep_idx_10],all_data$lat[dep_idx_10])
+
+A_indep <- inla.spde.make.A(mesh, loc=d_indep)
+A_dep <- inla.spde.make.A(mesh, loc=d_dep)
+A_both <- inla.spde.make.A(mesh, loc=rbind(d_indep,d_dep))
+A_both_50 <- inla.spde.make.A(mesh, loc=rbind(d_indep,d_dep_50))
+A_both_33 <- inla.spde.make.A(mesh, loc=rbind(d_indep,d_dep_33))
+A_both_10 <- inla.spde.make.A(mesh, loc=rbind(d_indep,d_dep_10))
+
+### for integrated modelling ####
+
+stack_indep<-inla.stack(data=list(y=cbind(c(all_data$obs_biomass[indep_idx]))),
+                        A=list(A_indep, 1),
+                        effects=list(spat_indep=1:spde$n.spde,
+                                     list(b0_indep=rep(1,n))),
+                        tag='est_indep')
+
+stack_dep<-inla.stack(data=list(y=cbind(c(all_data$obs_biomass[dep_idx]))),
+                      A=list(A_dep, 1),
+                      effects=list(spat_dep=1:spde$n.spde,
+                                   list(b0_dep=rep(1,n))),
+                      tag='est_dep')
+
+stack_both<-inla.stack(data=list(y=cbind(c(all_data$obs_biomass[c(indep_idx,dep_idx)]))),
+                       A=list(A_both, 1),
+                       effects=list(spat_both=1:spde$n.spde,
+                                    list(b0_both=rep(1,2*n))),
+                       tag='est_both')
+
+stack_both_50<-inla.stack(data=list(y=cbind(c(all_data$obs_biomass[c(indep_idx,dep_idx_50)]))),
+                          A=list(A_both_50, 1),
+                          effects=list(spat_both=1:spde$n.spde,
+                                       list(b0_both=rep(1,n+round(n*.5)))),
+                          tag='est_both')
+
+stack_both_33<-inla.stack(data=list(y=cbind(c(all_data$obs_biomass[c(indep_idx,dep_idx_33)]))),
+                          A=list(A_both_33, 1),
+                          effects=list(spat_both=1:spde$n.spde,
+                                       list(b0_both=rep(1,n+round(n*.33)))),
+                          tag='est_both')
+
+stack_both_10<-inla.stack(data=list(y=cbind(c(all_data$obs_biomass[c(indep_idx,dep_idx_10)]))),
+                          A=list(A_both_10, 1),
+                          effects=list(spat_both=1:spde$n.spde,
+                                       list(b0_both=rep(1,n+round(n*.1)))),
+                          tag='est_both')
+
+#################
+#### fit #####
+###########
+indep_fit = inla(y ~  -1  +  b0_indep +
+                   f(spat_indep,model=spde),
+                 family=c("gaussian"),control.inla = list(strategy = "simplified.laplace"),
+                 data=inla.stack.data(stack_indep), control.compute=list(waic=T,cpo=F,config=F),
+                 control.predictor=list(A=inla.stack.A(stack_indep), compute=F,link=1),
+                 #control.fixed = list(expand.factor.strategy = "inla"),
+                 verbose=F,num.threads = 2)
+
+dep_fit = inla(y ~  -1  +  b0_dep +
+                 f(spat_dep,model=spde),
+               family=c("gaussian"),control.inla = list(strategy = "simplified.laplace"),
+               data=inla.stack.data(stack_dep), control.compute=list(waic=T,cpo=F,config=F),
+               control.predictor=list(A=inla.stack.A(stack_dep), compute=F,link=1),
+               #control.fixed = list(expand.factor.strategy = "inla"),
+               verbose=F,num.threads = 2)
+
+both_fit = inla(y ~  -1  +  b0_both +
+                  f(spat_both,model=spde),
+                family=c("gaussian"),control.inla = list(strategy = "simplified.laplace"),
+                data=inla.stack.data(stack_both), control.compute=list(waic=T,cpo=F,config=F),
+                control.predictor=list(A=inla.stack.A(stack_both), compute=F,link=1),
+                #control.fixed = list(expand.factor.strategy = "inla"),
+                verbose=F,num.threads = 2)
+
+both_fit_50 = inla(y ~  -1  +  b0_both +
+                     f(spat_both,model=spde),
+                   family=c("gaussian"),control.inla = list(strategy = "simplified.laplace"),
+                   data=inla.stack.data(stack_both_50), control.compute=list(waic=T,cpo=F,config=F),
+                   control.predictor=list(A=inla.stack.A(stack_both_50), compute=F,link=1),
+                   #control.fixed = list(expand.factor.strategy = "inla"),
+                   verbose=F,num.threads = 2)
+
+both_fit_33 = inla(y ~  -1  +  b0_both +
+                     f(spat_both,model=spde),
+                   family=c("gaussian"),control.inla = list(strategy = "simplified.laplace"),
+                   data=inla.stack.data(stack_both_33), control.compute=list(waic=T,cpo=F,config=F),
+                   control.predictor=list(A=inla.stack.A(stack_both_33), compute=F,link=1),
+                   #control.fixed = list(expand.factor.strategy = "inla"),
+                   verbose=F,num.threads = 2)
+
+both_fit_10 = inla(y ~  -1  +  b0_both +
+                     f(spat_both,model=spde),
+                   family=c("gaussian"),control.inla = list(strategy = "simplified.laplace"),
+                   data=inla.stack.data(stack_both_10), control.compute=list(waic=T,cpo=F,config=F),
+                   control.predictor=list(A=inla.stack.A(stack_both_10), compute=F,link=1),
+                   #control.fixed = list(expand.factor.strategy = "inla"),
+                   verbose=F,num.threads = 2)
+
+##########################
+##### spatial #######
+#################
+
+### indep
+spat_potdata=data.frame(Lon = mesh$loc[,1],Lat=mesh$loc[,2],
+                        Mean = indep_fit$summary.random$spat_indep$mean)
+indep_spat = ggplot(spat_potdata) + geom_point(aes(x=Lon,y=Lat,color=Mean),size=4)+ xlim(0,dims)+ ylim(0,dims)+
+  theme_bw()+ggtitle("Indep data fit") + geom_point(data=all_data[indep_idx,],aes(x=lon,y=lat),color="red",shape=16,alpha=1) + theme(legend.position = "none") + 
+  scale_color_distiller(type = "seq",
+                        direction = -1,
+                        palette = "Greys")
+
+
+## dep
+spat_potdata=data.frame(Lon = mesh$loc[,1],Lat=mesh$loc[,2],
+                        Mean = dep_fit$summary.random$spat_dep$mean)
+dep_spat = ggplot(spat_potdata) + geom_point(aes(x=Lon,y=Lat,color=Mean),size=4)+ xlim(0,dims)+ ylim(0,dims)+
+  theme_bw()+ggtitle("Dep data fit") + geom_point(data=all_data[dep_idx,],aes(x=lon,y=lat),color="red",shape=16,alpha=1) + theme(legend.position = "none") + 
+  scale_color_distiller(type = "seq",
+                        direction = -1,
+                        palette = "Greys")
+
+
+## both
+spat_potdata=data.frame(Lon = mesh$loc[,1],Lat=mesh$loc[,2],
+                        Mean = both_fit$summary.random$spat_both$mean)
+both_spat = ggplot(spat_potdata) + geom_point(aes(x=Lon,y=Lat,color=Mean),size=4)+ xlim(0,dims)+ ylim(0,dims)+
+  theme_bw()+ggtitle("Both data fit") + geom_point(data=all_data[c(indep_idx,dep_idx),],aes(x=lon,y=lat),color="red",shape=16,alpha=1) + theme(legend.position = "none") + 
+  scale_color_distiller(type = "seq",
+                        direction = -1,
+                        palette = "Greys")
+
+
+## both_50
+spat_potdata=data.frame(Lon = mesh$loc[,1],Lat=mesh$loc[,2],
+                        Mean = both_fit_50$summary.random$spat_both$mean)
+both_spat_50 = ggplot(spat_potdata) + geom_point(aes(x=Lon,y=Lat,color=Mean),size=4)+ xlim(0,dims)+ ylim(0,dims)+
+  theme_bw()+ggtitle("Both 50% data fit") + geom_point(data=all_data[c(indep_idx,dep_idx_50),],aes(x=lon,y=lat),color="red",shape=16,alpha=1) + theme(legend.position = "none") + 
+  scale_color_distiller(type = "seq",
+                        direction = -1,
+                        palette = "Greys")
+
+## both_33
+spat_potdata=data.frame(Lon = mesh$loc[,1],Lat=mesh$loc[,2],
+                        Mean = both_fit_33$summary.random$spat_both$mean)
+both_spat_33 = ggplot(spat_potdata) + geom_point(aes(x=Lon,y=Lat,color=Mean),size=4)+ xlim(0,dims)+ ylim(0,dims)+
+  theme_bw()+ggtitle("Both 33% data fit") + geom_point(data=all_data[c(indep_idx,dep_idx_33),],aes(x=lon,y=lat),color="red",shape=16,alpha=1) + theme(legend.position = "none") + 
+  scale_color_distiller(type = "seq",
+                        direction = -1,
+                        palette = "Greys")
+
+## both_10
+spat_potdata=data.frame(Lon = mesh$loc[,1],Lat=mesh$loc[,2],
+                        Mean = both_fit_10$summary.random$spat_both$mean)
+both_spat_10 = ggplot(spat_potdata) + geom_point(aes(x=Lon,y=Lat,color=Mean),size=4)+ xlim(0,dims)+ ylim(0,dims)+
+  theme_bw()+ggtitle("Both 10% data fit") + geom_point(data=all_data[c(indep_idx,dep_idx_10),],aes(x=lon,y=lat),color="red",shape=16,alpha=1) + theme(legend.position = "none") + 
+  scale_color_distiller(type = "seq",
+                        direction = -1,
+                        palette = "Greys")
+
+
+
+###############################################
+################# plots ##################
+######################################
+
+a = ggplot(all_data) + geom_raster(aes(x=lon,y=lat,fill=mean_biomass)) + scale_fill_gradient2(low="blue",mid="black",high = "red")+ 
+  geom_point(data =  all_data[indep_idx,],aes(x=lon,y=lat),shape=16,color="green",size=2) +
+  geom_point(data =  all_data[dep_idx,],aes(x=lon,y=lat),shape=16,color="blue",size=2)
+b = aa + geom_point(data =  all_data[indep_idx,],aes(x=lon,y=lat),shape=16,color="green",size=2) +
+  geom_point(data =  all_data[dep_idx,],aes(x=lon,y=lat),shape=16,color="blue",size=2)
+
+gridExtra::grid.arrange(a,b,ncol=2)
+
+
+gridExtra::grid.arrange(indep_spat,dep_spat,both_spat,both_spat_50,both_spat_33,both_spat_10,ncol=3)
+
+
+#############################
+#### observation error ###
+
+indep_fit$summary.hyperpar[1,]
+both_fit$summary.hyperpar[1,]
+both_fit_50$summary.hyperpar[1,]
+both_fit_33$summary.hyperpar[1,]
+both_fit_10$summary.hyperpar[1,]
+
+
+
+
+
+
