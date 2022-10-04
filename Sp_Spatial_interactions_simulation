@@ -1,0 +1,1826 @@
+---
+title: "Homogeneus habitat results"
+author: "Iosu"
+date: "3/8/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+require(tidyr)
+require(ggplot2)
+require(stringr)
+require(gridExtra)
+library(reshape2)
+require(knitr)
+require(INLA)
+require(rgdal)
+require(RandomFields)
+require(lattice)
+require(scales)
+library(grid)
+require(overlapping)
+require(scoringRules)
+require(raster)
+
+link="C:/Users/ip30/Dropbox/servidor/fish_fish/results_pp_sim/"
+fils=list.files(path = link,pattern = "Homo")
+
+for(i in 1:length(fils)){
+  load(paste0(link,fils[i]))
+}
+```
+
+# Objective
+
+**Test** the performance of different **species interaction models under a PERFECT scenario** (no missing covariate effects)
+
+- Can we use model selection scores to assess the type of interaction ?
+
+# Simulation
+
+Our simulation iteratively adds new specimens into the study area given the proximity to other specimens of the same species (spat autoc) and the interaction with the amount of animals of the other species in that site:
+
+- The distributiuon of the species. Sort of a dispersal effect that helps spatial correlation
+- The abundance of the other species and the particular interaction with it
+
+We are testing:
+
+- **Homogeneous habitat**: *the aim is to test whether we can withdraw informative interaction parameters through joint modelling*. There is no environmental heterogeneity, i.e. the drivers of the distributions are only the interaction and the spatial autocorrelation "dispersal effect"
+
+# Model selection scores
+
+- **WAIC**: goodness of fit
+- **LCPO**: leave-one-out cross-validation score
+- **PIT_overlap**: PIT values in a good model should follow a unifrom distribution. Here we check the similarity/overlap of the observed PIT values with a uniform distribution
+
+Cross validation 5 times (20 percent of data out each time)
+
+- **MAE**: mean absolute error of remaining 20% of data
+- **CRPS**: checks how well the posterio distribution contains the actual observed value. Perfrmed over the remaining 20% of the data.
+
+
+# Fitted models {.tabset}
+
+Every joint model is scaled in Sp2's predictor.
+
+*W* refers to a geostatistical field
+
+
+## Indep
+
+Two independent models
+
+$\begin{align}
+\eta1 & = Interc_{1} + W_1 \\
+\eta2 & = Interc_{2} + W_2 \\
+\end{align}$
+
+## Traditional interaction
+
+Two independent models
+
+$\begin{align}
+\eta1 & = Intercept_{1} + W_1 + \beta_{1}*obs_1 \\
+\eta2 & = Intercept_{2} + W_2 + \beta_{2}*obs_2\\
+\end{align}$
+
+## Model 0
+
+A joint spatial model
+
+$\begin{align}
+\eta1 & = Intercept_{1} + \alpha_1 * W \\
+\eta2 & = Intercept_{2} + \alpha_2 * W \\
+\end{align}$
+
+## Model 1
+
+A joint spatial model + extra spatial model in Sp1
+
+$\begin{align}
+\eta1 & = Intercept_{1} + \alpha_1 * W + W_1 \\
+\eta2 & = Intercept_{2} + \alpha_2 * W \\
+\end{align}$
+
+## Model 2
+
+A joint spatial model + extra spatial model in Sp2
+
+$\begin{align}
+\eta1 & = Intercept_{1} + \alpha_1 * W \\
+\eta2 & = Intercept_{2} + \alpha_2 * W + W_2 \\
+\end{align}$
+
+# Homogeneus habitat results {.tabset}
+
+```{r homo, echo=FALSE}
+homo = ls()[which(str_detect(ls(), "Homo") & str_detect(ls(), "scores"))]
+homo_alpha = ls()[which(str_detect(ls(), "Homo") & str_detect(ls(), "alpha"))]
+
+
+```
+
+## --- and --- {.tabset}
+
+**Observations:**
+
+<!-- - Joint model: interaction $\neq 0$, traditional covariate fixed effect interaction $\simeq 0$ -->
+<!-- - CRPS and MAE only model selection scores that may favour independent and traditional interaction models  -->
+
+### Simulated model model
+
+- Sp2 NO effect on Sp1
+- Sp1 NO effect on Sp2
+
+```{r simulation,echo=F,warning=F,message=F,fig.width=12}
+#### scale of environ similarity
+scale=0.5
+#### interactions
+i1=0
+i2=0
+
+## spatial autocor due to proximity
+# also avoid 0 probability locations
+ag1=.1
+ag2=.1
+min.prob = .1
+
+## define the locations:
+from <- 0
+to <- 10
+#to <- 5
+x.seq <- seq(from, to, length=31) 
+y.seq <- seq(from, to, length=31)
+model_J1 <-   RMmatern(nu=1,var=4,scale=20)
+simu_J1 <- RFsimulate(model_J1, x=x.seq, y=y.seq)
+coords = cbind(coordinates(simu_J1)[,1],coordinates(simu_J1)[,2])
+min.dist=max(abs(diff(x.seq)))
+neighbors=sapply(1:nrow(coords),function(x){
+  which(pointDistance(coords[x,],coords,lonlat=F)<(min.dist*2))
+})
+
+model_J2 <-   RMmatern(nu=1,var=2,scale=12)
+  simu_J2 <- RFsimulate(model_J2, x=x.seq, y=y.seq)
+  
+  lon=coordinates(simu_J2)[,1]
+  lat=coordinates(simu_J2)[,2]
+  
+  common = rescale(simu_J2@data$variable1,to=c(0,8))
+  ## sp1
+  effect_common_sp1 = dgamma(common,20,1/(6/18))
+  effect_common_sp1 <- rescale(effect_common_sp1,to=c(-2,2))
+  ##sp2
+  effect_common_sp2 = scale*effect_common_sp1
+  
+  
+  n.cells=length(x.seq)*length(y.seq)
+  mean_sp1_per_loc=20
+  mean_sp2_per_loc=20
+  
+  n.sim=1000
+  
+  n.per.t.sp1=round((n.cells*mean_sp1_per_loc)/n.sim)
+  n.per.t.sp2=round((n.cells*mean_sp2_per_loc)/n.sim)
+  abu_sp1=abu_sp2=rep(0,n.cells)
+  
+  for(t in 1:n.sim){
+    #########
+    ### sp1
+    #########
+
+    ### without covariates
+    prob_sp1 = min.prob + i1*abu_sp2 + sapply(1:nrow(coords),function(x){sum(abu_sp1[neighbors[[x]]]*ag1)})
+    
+    if(sum(prob_sp1)==min.prob*n.cells){prob_sp1=rep(1/n.cells,n.cells)}else{
+      prob_sp1=(prob_sp1-min(prob_sp1)+min.prob);prob_sp1=prob_sp1/sum(prob_sp1) 
+    }
+    
+    idx.1=sample(1:length(prob_sp1),n.per.t.sp1,prob=prob_sp1,replace = T)
+    ind=table(idx.1)
+    cells=as.numeric(names(ind))
+    numbers=as.vector(ind)
+    
+    abu_sp1[cells]=abu_sp1[cells]+numbers
+    
+    ##########
+    ### sp2
+    ##########
+    
+    ### without covariates
+    prob_sp2 = min.prob + i2*abu_sp1 + sapply(1:nrow(coords),function(x){sum(abu_sp2[neighbors[[x]]]*ag2)})
+    
+    if(sum(prob_sp2)==min.prob*n.cells){prob_sp2=rep(1/n.cells,n.cells)}else{
+      prob_sp2=(prob_sp2-min(prob_sp2)+min.prob);prob_sp2=prob_sp2/sum(prob_sp2)
+    }
+    
+    idx.2=sample(1:length(prob_sp2),n.per.t.sp1,prob=prob_sp2,replace = T)
+    ind=table(idx.2)
+    cells=as.numeric(names(ind))
+    numbers=as.vector(ind)
+    
+    abu_sp2[cells]=abu_sp2[cells]+numbers
+  }
+  df.sim=data.frame(sp1=abu_sp1,sp2=abu_sp2,x=coordinates(simu_J2)[,1],
+                    y=coordinates(simu_J2)[,2],common_var=simu_J2$variable1,common_var=simu_J2$variable1)
+  
+  df.sim=data.frame(sp1=abu_sp1,sp2=abu_sp2,
+                    x=coordinates(simu_J2)[,1],
+                    y=coordinates(simu_J2)[,2],
+                    common=simu_J2$variable1,
+                    common_group=inla.group(simu_J2$variable1,n=20))
+  
+  
+        sp1=ggplot(df.sim)+geom_point(aes(x=x,y=y,color=sp1),size=10)+ggtitle("Sp1")
+        sp2=ggplot(df.sim)+geom_point(aes(x=x,y=y,color=sp2),size=10)+ggtitle("Sp2")
+        grid.arrange(sp1,sp2,ncol=2)
+  
+  
+```
+
+
+
+
+### Scaling parameter
+```{r homo1_alpha, echo=FALSE,warning=F,message=F,fig.height=6,fig.width=12}
+## `HomoHab_alpha.i1_0.i2_0`
+alpha = as.data.frame(t(`HomoHab_alpha.i1_0.i2_0`$alpha))
+names(alpha)=c("trad 1","trad 2","M_0 C1","M_0 C2","M_1 C1","M_1 C2","M_2 C1","M_2 C2")
+ea=gather(alpha)
+
+sig1=gather(as.data.frame(t(`HomoHab_alpha_sp1_significance.i1_0.i2_0`$alpha)))
+sig2=gather(as.data.frame(t(`HomoHab_alpha_sp2_significance.i1_0.i2_0`$alpha)))
+sig=rbind(sig1,sig2)
+
+### model selections
+scores=rbind(
+# waic
+apply(t(`HomoHab_scores.i1_0.i2_0`$delta_waic),1,function(x){sum(x==0)}),
+
+# crps
+apply(t(`HomoHab_scores.i1_0.i2_0`$delta_crps),1,function(x){sum(x==0)}),
+# mae
+apply(t(`HomoHab_scores.i1_0.i2_0`$delta_mae),1,function(x){sum(x==0)}),
+
+# lcpo
+apply(t(`HomoHab_scores.i1_0.i2_0`$delta_lcpo),1,function(x){sum(x==0)}),
+
+# pit overlap
+apply(t(`HomoHab_scores.i1_0.i2_0`$delta_pit_overlap),1,function(x){sum(x==0)})
+)
+rownames(scores)=c("waic","crps","mae","lcpo","pit_overlap")
+
+alph = ggplot(ea) +geom_boxplot(aes(x=key,y=value)) +geom_point(aes(x=key,y=value)) + geom_hline(yintercept=0,color="red") + geom_hline(yintercept=1,color="blue") + geom_hline(yintercept=-1,color="blue") +   scale_x_discrete(labels=c("M0 alpha1","M0 alpha2","M1 alpha1","M1 alpha2","M2 alpha1","M2 alpha2","Trad beta1","Trad beta2")) + ggtitle("Scaling parameter alpha_1/alpha_2") +
+  ylim(-1,10)
+signi = ggplot(sig) +geom_boxplot(aes(x=key,y=value)) +geom_point(aes(x=key,y=value)) + ggtitle("Percentile of 0 in Alpha param") + ylim(0,1)
+grid.arrange(alph,signi,ncol=2)
+```
+
+### Scaled model selection scores
+```{r homo1_sc, echo=FALSE,warning=F,message=F,message=F,fig.width=12}
+# waic
+scaled_waic=as.data.frame(t(`HomoHab_scores.i1_0.i2_0`$scaled_waic))
+scaled_waic$model=c("indep","traditional","model 0","model 1","model 2")
+scaled_waic=scaled_waic %>% gather(key = simulation,value = classification, V1:V10)
+scaled_waic$score = "waic"
+
+# crps
+scaled_crps=as.data.frame(t(`HomoHab_scores.i1_0.i2_0`$scaled_crps))
+scaled_crps$model=c("indep","traditional","model 0","model 1","model 2")
+scaled_crps=scaled_crps %>% gather(key = simulation,value = classification, V1:V10)
+scaled_crps$score = "crps"
+
+# mae
+scaled_mae=as.data.frame(t(`HomoHab_scores.i1_0.i2_0`$scaled_mae))
+scaled_mae$model=c("indep","traditional","model 0","model 1","model 2")
+scaled_mae=scaled_mae %>% gather(key = simulation,value = classification, V1:V10)
+scaled_mae$score = "mae"
+
+# lcpo
+scaled_lcpo=as.data.frame(t(`HomoHab_scores.i1_0.i2_0`$scaled_lcpo))
+scaled_lcpo$model=c("indep","traditional","model 0","model 1","model 2")
+scaled_lcpo=scaled_lcpo %>% gather(key = simulation,value = classification, V1:V10)
+scaled_lcpo$score = "lcpo"
+
+
+# pit overlap
+scaled_pit_overlap=as.data.frame(t(`HomoHab_scores.i1_0.i2_0`$scaled_pit_overlap))
+scaled_pit_overlap$model=c("indep","traditional","model 0","model 1","model 2")
+scaled_pit_overlap=scaled_pit_overlap %>% gather(key = simulation,value = classification, V1:V10)
+scaled_pit_overlap$score = "pit_overlap"
+
+
+### model selections
+scaled_scores=rbind(scaled_waic,scaled_crps,scaled_mae,scaled_lcpo,scaled_pit_overlap)
+ggplot(scaled_scores,aes(x=model,y=classification)) + geom_boxplot() + #geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue") +
+  facet_wrap(~score)
+```
+
+### Model selection scores
+```{r homo1_m, echo=FALSE,warning=F,message=F,message=F,fig.width=12,fig.height=8}
+#scores
+
+# waic
+waic=as.data.frame(`HomoHab_scores.i1_0.i2_0`$delta_waic)
+#waic$model=c("indep","traditional","model 0","model 1","model 2")
+waic=waic %>% gather(key = model,value = score, indep:`model 2`)
+waic$metric = "waic"
+
+# crps
+crps=as.data.frame(`HomoHab_scores.i1_0.i2_0`$delta_crps)
+#crps$model=c("indep","traditional","model 0","model 1","model 2")
+crps=crps %>% gather(key = model,value = score, indep:`model 2`)
+crps$metric = "crps"
+
+# mae
+mae=as.data.frame(`HomoHab_scores.i1_0.i2_0`$delta_mae)
+#mae$model=c("indep","traditional","model 0","model 1","model 2")
+mae=mae %>% gather(key = model,value = score, indep:`model 2`)
+mae$metric = "mae"
+
+# lcpo
+lcpo=as.data.frame(`HomoHab_scores.i1_0.i2_0`$delta_lcpo)
+#lcpo$model=c("indep","traditional","model 0","model 1","model 2")
+lcpo=lcpo %>% gather(key = model,value = score, indep:`model 2`)
+lcpo$metric = "lcpo"
+
+# pit overlap
+pit_overlap=as.data.frame(`HomoHab_scores.i1_0.i2_0`$delta_pit_overlap)
+#pit_overlap$model=c("indep","traditional","model 0","model 1","model 2")
+pit_overlap=pit_overlap %>% gather(key = model,value = score, indep:`model 2`)
+pit_overlap$metric = "pit_overlap"
+
+### model selections
+scores=rbind(waic,crps,mae,lcpo,pit_overlap)
+#ggplot(scores,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue") + facet_wrap(~metric) +ylim(0,5)
+
+waic_p = ggplot(waic,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue")  +ylim(0,20) +ggtitle("delta_WAIC")
+crps_p = ggplot(crps,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue")  +ylim(0,0.03) +ggtitle("delta_CRPS")
+lcpo_p = ggplot(lcpo,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue")  +ylim(0,.01)  +ggtitle("delta_LCPO")
+mae_p = ggplot(mae,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue")  +ylim(0,.04)  +ggtitle("delta_MAE")
+pit_overlap_p = ggplot(pit_overlap,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue")  +ylim(0,.01)  +ggtitle("delta_PIT OVERLAP")
+grid.arrange(waic_p,crps_p,mae_p,lcpo_p,pit_overlap_p)
+```
+
+### Ranked model selection scores
+```{r homo1, echo=FALSE,warning=F,message=F,message=F,fig.width=12}
+#scores
+
+# waic
+waic=as.data.frame(apply(`HomoHab_scores.i1_0.i2_0`$delta_waic,1,rank))
+waic$model=c("indep","traditional","model 0","model 1","model 2")
+waic=waic %>% gather(key = simulation,value = classification, V1:V10)
+waic$score = "waic"
+
+# crps
+crps=as.data.frame(apply(`HomoHab_scores.i1_0.i2_0`$delta_crps,1,rank))
+crps$model=c("indep","traditional","model 0","model 1","model 2")
+crps=crps %>% gather(key = simulation,value = classification, V1:V10)
+crps$score = "crps"
+
+# mae
+mae=as.data.frame(apply(`HomoHab_scores.i1_0.i2_0`$delta_mae,1,rank))
+mae$model=c("indep","traditional","model 0","model 1","model 2")
+mae=mae %>% gather(key = simulation,value = classification, V1:V10)
+mae$score = "mae"
+
+# lcpo
+lcpo=as.data.frame(apply(`HomoHab_scores.i1_0.i2_0`$delta_lcpo,1,rank))
+lcpo$model=c("indep","traditional","model 0","model 1","model 2")
+lcpo=lcpo %>% gather(key = simulation,value = classification, V1:V10)
+lcpo$score = "lcpo"
+
+# pit overlap
+pit_overlap=as.data.frame(apply(`HomoHab_scores.i1_0.i2_0`$delta_pit_overlap,1,rank))
+pit_overlap$model=c("indep","traditional","model 0","model 1","model 2")
+pit_overlap=pit_overlap %>% gather(key = simulation,value = classification, V1:V10)
+pit_overlap$score = "pit_overlap"
+
+### model selections
+scores=rbind(waic,crps,mae,lcpo,pit_overlap)
+ggplot(scores,aes(x=model,y=classification)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue") + facet_wrap(~score)
+
+```
+
+## --- and +0.25 {.tabset}
+
+**Observations:**
+
+<!-- - interactions are positive in all models (they estimate  more or less well) -->
+<!-- - model selection scores: -->
+<!--   - *Model 0* does very bad in WAIC, MAE and CRPS -->
+<!--   - CRPS and MAE best in *independet model* -->
+<!--   - WAIC and LCPO prefer *Joint models* -->
+<!--   - PIT prefers models 1 and 2 -->
+
+### Simulated model model
+
+- Sp2 NO effect on Sp1
+- Sp1 +0.25 effect on Sp2
+
+```{r simulation2,echo=F,warning=F,message=F,fig.width=12}
+#### scale of environ similarity
+scale=0.5
+#### interactions
+i1=0
+i2=0.25
+
+## spatial autocor due to proximity
+# also avoid 0 probability locations
+ag1=.1
+ag2=.1
+min.prob = .1
+
+## define the locations:
+from <- 0
+to <- 10
+#to <- 5
+x.seq <- seq(from, to, length=31) 
+y.seq <- seq(from, to, length=31)
+model_J1 <-   RMmatern(nu=1,var=4,scale=20)
+simu_J1 <- RFsimulate(model_J1, x=x.seq, y=y.seq)
+coords = cbind(coordinates(simu_J1)[,1],coordinates(simu_J1)[,2])
+min.dist=max(abs(diff(x.seq)))
+neighbors=sapply(1:nrow(coords),function(x){
+  which(pointDistance(coords[x,],coords,lonlat=F)<(min.dist*2))
+})
+
+model_J2 <-   RMmatern(nu=1,var=2,scale=12)
+  simu_J2 <- RFsimulate(model_J2, x=x.seq, y=y.seq)
+  
+  lon=coordinates(simu_J2)[,1]
+  lat=coordinates(simu_J2)[,2]
+  
+  common = rescale(simu_J2@data$variable1,to=c(0,8))
+  ## sp1
+  effect_common_sp1 = dgamma(common,20,1/(6/18))
+  effect_common_sp1 <- rescale(effect_common_sp1,to=c(-2,2))
+  ##sp2
+  effect_common_sp2 = scale*effect_common_sp1
+  
+  
+  n.cells=length(x.seq)*length(y.seq)
+  mean_sp1_per_loc=20
+  mean_sp2_per_loc=20
+  
+  n.sim=1000
+  
+  n.per.t.sp1=round((n.cells*mean_sp1_per_loc)/n.sim)
+  n.per.t.sp2=round((n.cells*mean_sp2_per_loc)/n.sim)
+  abu_sp1=abu_sp2=rep(0,n.cells)
+  
+  for(t in 1:n.sim){
+    #########
+    ### sp1
+    #########
+
+    ### without covariates
+    prob_sp1 = min.prob + i1*abu_sp2 + sapply(1:nrow(coords),function(x){sum(abu_sp1[neighbors[[x]]]*ag1)})
+    
+    if(sum(prob_sp1)==min.prob*n.cells){prob_sp1=rep(1/n.cells,n.cells)}else{
+      prob_sp1=(prob_sp1-min(prob_sp1)+min.prob);prob_sp1=prob_sp1/sum(prob_sp1) 
+    }
+    
+    idx.1=sample(1:length(prob_sp1),n.per.t.sp1,prob=prob_sp1,replace = T)
+    ind=table(idx.1)
+    cells=as.numeric(names(ind))
+    numbers=as.vector(ind)
+    
+    abu_sp1[cells]=abu_sp1[cells]+numbers
+    
+    ##########
+    ### sp2
+    ##########
+    
+    ### without covariates
+    prob_sp2 = min.prob + i2*abu_sp1 + sapply(1:nrow(coords),function(x){sum(abu_sp2[neighbors[[x]]]*ag2)})
+    
+    if(sum(prob_sp2)==min.prob*n.cells){prob_sp2=rep(1/n.cells,n.cells)}else{
+      prob_sp2=(prob_sp2-min(prob_sp2)+min.prob);prob_sp2=prob_sp2/sum(prob_sp2)
+    }
+    
+    idx.2=sample(1:length(prob_sp2),n.per.t.sp1,prob=prob_sp2,replace = T)
+    ind=table(idx.2)
+    cells=as.numeric(names(ind))
+    numbers=as.vector(ind)
+    
+    abu_sp2[cells]=abu_sp2[cells]+numbers
+  }
+  df.sim=data.frame(sp1=abu_sp1,sp2=abu_sp2,x=coordinates(simu_J2)[,1],
+                    y=coordinates(simu_J2)[,2],common_var=simu_J2$variable1,common_var=simu_J2$variable1)
+  
+  df.sim=data.frame(sp1=abu_sp1,sp2=abu_sp2,
+                    x=coordinates(simu_J2)[,1],
+                    y=coordinates(simu_J2)[,2],
+                    common=simu_J2$variable1,
+                    common_group=inla.group(simu_J2$variable1,n=20))
+  
+  
+        sp1=ggplot(df.sim)+geom_point(aes(x=x,y=y,color=sp1),size=10)+ggtitle("Sp1")
+        sp2=ggplot(df.sim)+geom_point(aes(x=x,y=y,color=sp2),size=10)+ggtitle("Sp2")
+        grid.arrange(sp1,sp2,ncol=2)
+  
+  
+```
+
+### Scaling parameter
+```{r homo2_alpha, echo=FALSE,warning=F,message=F,fig.height=6,fig.width=12}
+## `HomoHab_alpha.i1_0.i2_0`
+alpha = as.data.frame(t(`HomoHab_alpha.i1_0.i2_0.25`$alpha))
+names(alpha)=c("trad 1","trad 2","M_0 C1","M_0 C2","M_1 C1","M_1 C2","M_2 C1","M_2 C2")
+ea=gather(alpha)
+
+sig1=gather(as.data.frame(t(`HomoHab_alpha_sp1_significance.i1_0.i2_0.25`$alpha)))
+sig2=gather(as.data.frame(t(`HomoHab_alpha_sp2_significance.i1_0.i2_0.25`$alpha)))
+sig=rbind(sig1,sig2)
+
+### model selections
+scores=rbind(
+# waic
+apply(t(`HomoHab_scores.i1_0.i2_0.25`$delta_waic),1,function(x){sum(x==0)}),
+
+# crps
+apply(t(`HomoHab_scores.i1_0.i2_0.25`$delta_crps),1,function(x){sum(x==0)}),
+
+# mae
+apply(t(`HomoHab_scores.i1_0.i2_0.25`$delta_mae),1,function(x){sum(x==0)}),
+
+# lcpo
+apply(t(`HomoHab_scores.i1_0.i2_0.25`$delta_lcpo),1,function(x){sum(x==0)}),
+
+# pit overlap
+apply(t(`HomoHab_scores.i1_0.i2_0.25`$delta_pit_overlap),1,function(x){sum(x==0)})
+)
+rownames(scores)=c("waic","crps","mae","lcpo","pit_overlap")
+
+alph = ggplot(ea) +geom_boxplot(aes(x=key,y=value)) +geom_point(aes(x=key,y=value)) + geom_hline(yintercept=0,color="red") + geom_hline(yintercept=1,color="blue") + geom_hline(yintercept=-1,color="blue") +   scale_x_discrete(labels=c("M0 alpha1","M0 alpha2","M1 alpha1","M1 alpha2","M2 alpha1","M2 alpha2","Trad beta1","Trad beta2")) + ggtitle("Scaling parameter alpha_1/alpha_2") 
+signi = ggplot(sig) +geom_boxplot(aes(x=key,y=value)) +geom_point(aes(x=key,y=value)) + ggtitle("Percentile of 0 in Alpha param") + ylim(0,1)
+grid.arrange(alph,signi,ncol=2)
+```
+
+### Scaled model selection scores
+```{r homo2_sc, echo=FALSE,warning=F,message=F,message=F,fig.width=12}
+
+# waic
+scaled_waic=as.data.frame(t(`HomoHab_scores.i1_0.i2_0.25`$scaled_waic))
+scaled_waic$model=c("indep","traditional","model 0","model 1","model 2")
+scaled_waic=scaled_waic %>% gather(key = simulation,value = classification, V1:V10)
+scaled_waic$score = "waic"
+
+# crps
+scaled_crps=as.data.frame(t(`HomoHab_scores.i1_0.i2_0.25`$scaled_crps))
+scaled_crps$model=c("indep","traditional","model 0","model 1","model 2")
+scaled_crps=scaled_crps %>% gather(key = simulation,value = classification, V1:V10)
+scaled_crps$score = "crps"
+
+# mae
+scaled_mae=as.data.frame(t(`HomoHab_scores.i1_0.i2_0.25`$scaled_mae))
+scaled_mae$model=c("indep","traditional","model 0","model 1","model 2")
+scaled_mae=scaled_mae %>% gather(key = simulation,value = classification, V1:V10)
+scaled_mae$score = "mae"
+
+# lcpo
+scaled_lcpo=as.data.frame(t(`HomoHab_scores.i1_0.i2_0.25`$scaled_lcpo))
+scaled_lcpo$model=c("indep","traditional","model 0","model 1","model 2")
+scaled_lcpo=scaled_lcpo %>% gather(key = simulation,value = classification, V1:V10)
+scaled_lcpo$score = "lcpo"
+
+
+# pit overlap
+scaled_pit_overlap=as.data.frame(t(`HomoHab_scores.i1_0.i2_0.25`$scaled_pit_overlap))
+scaled_pit_overlap$model=c("indep","traditional","model 0","model 1","model 2")
+scaled_pit_overlap=scaled_pit_overlap %>% gather(key = simulation,value = classification, V1:V10)
+scaled_pit_overlap$score = "pit_overlap"
+
+
+### model selections
+scaled_scores=rbind(scaled_waic,scaled_crps,scaled_mae,scaled_lcpo,scaled_pit_overlap)
+ggplot(scaled_scores,aes(x=model,y=classification)) + geom_boxplot() + #geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue") +
+  facet_wrap(~score)
+```
+
+### Model selection scores
+```{r homo2_m, echo=FALSE,warning=F,message=F,message=F,fig.width=12,fig.height=8}
+#scores
+
+# waic
+waic=as.data.frame(`HomoHab_scores.i1_0.i2_0.25`$delta_waic)
+#waic$model=c("indep","traditional","model 0","model 1","model 2")
+waic=waic %>% gather(key = model,value = score, indep:`model 2`)
+waic$metric = "waic"
+
+# crps
+crps=as.data.frame(`HomoHab_scores.i1_0.i2_0.25`$delta_crps)
+#crps$model=c("indep","traditional","model 0","model 1","model 2")
+crps=crps %>% gather(key = model,value = score, indep:`model 2`)
+crps$metric = "crps"
+
+# mae
+mae=as.data.frame(`HomoHab_scores.i1_0.i2_0.25`$delta_mae)
+#mae$model=c("indep","traditional","model 0","model 1","model 2")
+mae=mae %>% gather(key = model,value = score, indep:`model 2`)
+mae$metric = "mae"
+
+# lcpo
+lcpo=as.data.frame(`HomoHab_scores.i1_0.i2_0.25`$delta_lcpo)
+#lcpo$model=c("indep","traditional","model 0","model 1","model 2")
+lcpo=lcpo %>% gather(key = model,value = score, indep:`model 2`)
+lcpo$metric = "lcpo"
+
+# pit overlap
+pit_overlap=as.data.frame(`HomoHab_scores.i1_0.i2_0.25`$delta_pit_overlap)
+#pit_overlap$model=c("indep","traditional","model 0","model 1","model 2")
+pit_overlap=pit_overlap %>% gather(key = model,value = score, indep:`model 2`)
+pit_overlap$metric = "pit_overlap"
+
+### model selections
+scores=rbind(waic,crps,mae,lcpo,pit_overlap)
+#ggplot(scores,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue") + facet_wrap(~metric) +ylim(0,5)
+
+waic_p = ggplot(waic,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue")  +ylim(0,100) +ggtitle("delta_WAIC")
+crps_p = ggplot(crps,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue")  +ylim(0,0.5) +ggtitle("delta_CRPS")
+lcpo_p = ggplot(lcpo,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue")  +ylim(0,1)  +ggtitle("delta_LCPO")
+mae_p = ggplot(mae,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue")  +ylim(0,1)  +ggtitle("delta_MAE")
+pit_overlap_p = ggplot(pit_overlap,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue")  +ylim(0,.31)  +ggtitle("delta_PIT OVERLAP")
+grid.arrange(waic_p,crps_p,mae_p,lcpo_p,pit_overlap_p)
+```
+
+### Ranked model selection scores
+```{r homo2, echo=FALSE,warning=F,message=F,fig.width=12}
+#scores
+
+# waic
+waic=as.data.frame(apply(`HomoHab_scores.i1_0.i2_0.25`$delta_waic,1,rank))
+waic$model=c("indep","traditional","model 0","model 1","model 2")
+waic=waic %>% gather(key = simulation,value = classification, V1:V10)
+waic$score = "waic"
+
+# crps
+crps=as.data.frame(apply(`HomoHab_scores.i1_0.i2_0.25`$delta_crps,1,rank))
+crps$model=c("indep","traditional","model 0","model 1","model 2")
+crps=crps %>% gather(key = simulation,value = classification, V1:V10)
+crps$score = "crps"
+
+# mae
+mae=as.data.frame(apply(`HomoHab_scores.i1_0.i2_0.25`$delta_mae,1,rank))
+mae$model=c("indep","traditional","model 0","model 1","model 2")
+mae=mae %>% gather(key = simulation,value = classification, V1:V10)
+mae$score = "mae"
+
+# lcpo
+lcpo=as.data.frame(apply(`HomoHab_scores.i1_0.i2_0.25`$delta_lcpo,1,rank))
+lcpo$model=c("indep","traditional","model 0","model 1","model 2")
+lcpo=lcpo %>% gather(key = simulation,value = classification, V1:V10)
+lcpo$score = "lcpo"
+
+# pit overlap
+pit_overlap=as.data.frame(apply(`HomoHab_scores.i1_0.i2_0.25`$delta_pit_overlap,1,rank))
+pit_overlap$model=c("indep","traditional","model 0","model 1","model 2")
+pit_overlap=pit_overlap %>% gather(key = simulation,value = classification, V1:V10)
+pit_overlap$score = "pit_overlap"
+
+### model selections
+scores=rbind(waic,crps,mae,lcpo,pit_overlap)
+ggplot(scores,aes(x=model,y=classification)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue") + facet_wrap(~score)
+```
+
+
+
+## --- and -0.25 {.tabset}
+
+**Observations:**
+
+<!-- - interactions are negative in all models (they all estimate more or less well) -->
+<!-- - model selection scores: -->
+<!--   - - *Model 0* does very bad in WAIC, MAE and CRPS -->
+<!--   - MAE and CRPS best in *independent model* -->
+<!--   - unclear which model does best in WAIC and LCPO -->
+
+### Simulated model model
+
+- Sp2 NO effect on Sp1
+- Sp1 -0.25 effect on Sp2
+
+```{r simulation3,echo=F,warning=F,message=F,fig.width=12}
+#### scale of environ similarity
+scale=0.5
+#### interactions
+i1=0
+i2=-0.25
+
+## spatial autocor due to proximity
+# also avoid 0 probability locations
+ag1=.1
+ag2=.1
+min.prob = .1
+
+## define the locations:
+from <- 0
+to <- 10
+#to <- 5
+x.seq <- seq(from, to, length=31) 
+y.seq <- seq(from, to, length=31)
+model_J1 <-   RMmatern(nu=1,var=4,scale=20)
+simu_J1 <- RFsimulate(model_J1, x=x.seq, y=y.seq)
+coords = cbind(coordinates(simu_J1)[,1],coordinates(simu_J1)[,2])
+min.dist=max(abs(diff(x.seq)))
+neighbors=sapply(1:nrow(coords),function(x){
+  which(pointDistance(coords[x,],coords,lonlat=F)<(min.dist*2))
+})
+
+model_J2 <-   RMmatern(nu=1,var=2,scale=12)
+  simu_J2 <- RFsimulate(model_J2, x=x.seq, y=y.seq)
+  
+  lon=coordinates(simu_J2)[,1]
+  lat=coordinates(simu_J2)[,2]
+  
+  common = rescale(simu_J2@data$variable1,to=c(0,8))
+  ## sp1
+  effect_common_sp1 = dgamma(common,20,1/(6/18))
+  effect_common_sp1 <- rescale(effect_common_sp1,to=c(-2,2))
+  ##sp2
+  effect_common_sp2 = scale*effect_common_sp1
+  
+  
+  n.cells=length(x.seq)*length(y.seq)
+  mean_sp1_per_loc=20
+  mean_sp2_per_loc=20
+  
+  n.sim=1000
+  
+  n.per.t.sp1=round((n.cells*mean_sp1_per_loc)/n.sim)
+  n.per.t.sp2=round((n.cells*mean_sp2_per_loc)/n.sim)
+  abu_sp1=abu_sp2=rep(0,n.cells)
+  
+  for(t in 1:n.sim){
+    #########
+    ### sp1
+    #########
+
+    ### without covariates
+    prob_sp1 = min.prob + i1*abu_sp2 + sapply(1:nrow(coords),function(x){sum(abu_sp1[neighbors[[x]]]*ag1)})
+    
+    if(sum(prob_sp1)==min.prob*n.cells){prob_sp1=rep(1/n.cells,n.cells)}else{
+      prob_sp1=(prob_sp1-min(prob_sp1)+min.prob);prob_sp1=prob_sp1/sum(prob_sp1) 
+    }
+    
+    idx.1=sample(1:length(prob_sp1),n.per.t.sp1,prob=prob_sp1,replace = T)
+    ind=table(idx.1)
+    cells=as.numeric(names(ind))
+    numbers=as.vector(ind)
+    
+    abu_sp1[cells]=abu_sp1[cells]+numbers
+    
+    ##########
+    ### sp2
+    ##########
+    
+    ### without covariates
+    prob_sp2 = min.prob + i2*abu_sp1 + sapply(1:nrow(coords),function(x){sum(abu_sp2[neighbors[[x]]]*ag2)})
+    
+    if(sum(prob_sp2)==min.prob*n.cells){prob_sp2=rep(1/n.cells,n.cells)}else{
+      prob_sp2=(prob_sp2-min(prob_sp2)+min.prob);prob_sp2=prob_sp2/sum(prob_sp2)
+    }
+    
+    idx.2=sample(1:length(prob_sp2),n.per.t.sp1,prob=prob_sp2,replace = T)
+    ind=table(idx.2)
+    cells=as.numeric(names(ind))
+    numbers=as.vector(ind)
+    
+    abu_sp2[cells]=abu_sp2[cells]+numbers
+  }
+  df.sim=data.frame(sp1=abu_sp1,sp2=abu_sp2,x=coordinates(simu_J2)[,1],
+                    y=coordinates(simu_J2)[,2],common_var=simu_J2$variable1,common_var=simu_J2$variable1)
+  
+  df.sim=data.frame(sp1=abu_sp1,sp2=abu_sp2,
+                    x=coordinates(simu_J2)[,1],
+                    y=coordinates(simu_J2)[,2],
+                    common=simu_J2$variable1,
+                    common_group=inla.group(simu_J2$variable1,n=20))
+  
+  
+        sp1=ggplot(df.sim)+geom_point(aes(x=x,y=y,color=sp1),size=10)+ggtitle("Sp1")
+        sp2=ggplot(df.sim)+geom_point(aes(x=x,y=y,color=sp2),size=10)+ggtitle("Sp2")
+        grid.arrange(sp1,sp2,ncol=2)
+  
+  
+```
+
+### Scaling parameter
+```{r homo3_alpha, echo=FALSE,warning=F,message=F,fig.height=6,fig.width=12}
+## `HomoHab_alpha.i1_0.i2_0`
+alpha = as.data.frame(t(`HomoHab_alpha.i1_0.i2_-0.25`$alpha))
+names(alpha)=c("trad 1","trad 2","M_0 C1","M_0 C2","M_1 C1","M_1 C2","M_2 C1","M_2 C2")
+ea=gather(alpha)
+
+sig1=gather(as.data.frame(t(`HomoHab_alpha_sp1_significance.i1_0.i2_-0.25`$alpha)))
+sig2=gather(as.data.frame(t(`HomoHab_alpha_sp2_significance.i1_0.i2_-0.25`$alpha)))
+sig=rbind(sig1,sig2)
+
+### model selections
+scores=rbind(
+# waic
+apply(t(`HomoHab_scores.i1_0.i2_-0.25`$delta_waic),1,function(x){sum(x==0)}),
+
+# crps
+apply(t(`HomoHab_scores.i1_0.i2_-0.25`$delta_crps),1,function(x){sum(x==0)}),
+
+# mae
+apply(t(`HomoHab_scores.i1_0.i2_-0.25`$delta_mae),1,function(x){sum(x==0)}),
+
+# lcpo
+apply(t(`HomoHab_scores.i1_0.i2_-0.25`$delta_lcpo),1,function(x){sum(x==0)}),
+
+# pit overlap
+apply(t(`HomoHab_scores.i1_0.i2_-0.25`$delta_pit_overlap),1,function(x){sum(x==0)})
+)
+rownames(scores)=c("waic","crps","mae","lcpo","pit_overlap")
+
+alph = ggplot(ea) +geom_boxplot(aes(x=key,y=value)) +geom_point(aes(x=key,y=value)) + geom_hline(yintercept=0,color="red") + geom_hline(yintercept=1,color="blue") + geom_hline(yintercept=-1,color="blue") +   scale_x_discrete(labels=c("M0 alpha1","M0 alpha2","M1 alpha1","M1 alpha2","M2 alpha1","M2 alpha2","Trad beta1","Trad beta2")) + ggtitle("Scaling parameter alpha_1/alpha_2") 
+signi = ggplot(sig) +geom_boxplot(aes(x=key,y=value)) +geom_point(aes(x=key,y=value)) + ggtitle("Percentile of 0 in Alpha param") + ylim(0,1)
+grid.arrange(alph,signi,ncol=2)
+```
+
+### Scaled model selection scores
+```{r homo3_sc, echo=FALSE,warning=F,message=F,message=F,fig.width=12}
+
+# waic
+scaled_waic=as.data.frame(t(`HomoHab_scores.i1_0.i2_-0.25`$scaled_waic))
+scaled_waic$model=c("indep","traditional","model 0","model 1","model 2")
+scaled_waic=scaled_waic %>% gather(key = simulation,value = classification, V1:V10)
+scaled_waic$score = "waic"
+
+# crps
+scaled_crps=as.data.frame(t(`HomoHab_scores.i1_0.i2_-0.25`$scaled_crps))
+scaled_crps$model=c("indep","traditional","model 0","model 1","model 2")
+scaled_crps=scaled_crps %>% gather(key = simulation,value = classification, V1:V10)
+scaled_crps$score = "crps"
+
+# mae
+scaled_mae=as.data.frame(t(`HomoHab_scores.i1_0.i2_-0.25`$scaled_mae))
+scaled_mae$model=c("indep","traditional","model 0","model 1","model 2")
+scaled_mae=scaled_mae %>% gather(key = simulation,value = classification, V1:V10)
+scaled_mae$score = "mae"
+
+# lcpo
+scaled_lcpo=as.data.frame(t(`HomoHab_scores.i1_0.i2_-0.25`$scaled_lcpo))
+scaled_lcpo$model=c("indep","traditional","model 0","model 1","model 2")
+scaled_lcpo=scaled_lcpo %>% gather(key = simulation,value = classification, V1:V10)
+scaled_lcpo$score = "lcpo"
+
+
+# pit overlap
+scaled_pit_overlap=as.data.frame(t(`HomoHab_scores.i1_0.i2_-0.25`$scaled_pit_overlap))
+scaled_pit_overlap$model=c("indep","traditional","model 0","model 1","model 2")
+scaled_pit_overlap=scaled_pit_overlap %>% gather(key = simulation,value = classification, V1:V10)
+scaled_pit_overlap$score = "pit_overlap"
+
+
+### model selections
+scaled_scores=rbind(scaled_waic,scaled_crps,scaled_mae,scaled_lcpo,scaled_pit_overlap)
+ggplot(scaled_scores,aes(x=model,y=classification)) + geom_boxplot() + #geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue") +
+  facet_wrap(~score)
+```
+
+### Model selection scores
+```{r homo3_m, echo=FALSE,warning=F,message=F,message=F,fig.width=12,fig.height=8}
+#scores
+
+# waic
+waic=as.data.frame(`HomoHab_scores.i1_0.i2_-0.25`$delta_waic)
+#waic$model=c("indep","traditional","model 0","model 1","model 2")
+waic=waic %>% gather(key = model,value = score, indep:`model 2`)
+waic$metric = "waic"
+
+# crps
+crps=as.data.frame(`HomoHab_scores.i1_0.i2_-0.25`$delta_crps)
+#crps$model=c("indep","traditional","model 0","model 1","model 2")
+crps=crps %>% gather(key = model,value = score, indep:`model 2`)
+crps$metric = "crps"
+
+# mae
+mae=as.data.frame(`HomoHab_scores.i1_0.i2_-0.25`$delta_mae)
+#mae$model=c("indep","traditional","model 0","model 1","model 2")
+mae=mae %>% gather(key = model,value = score, indep:`model 2`)
+mae$metric = "mae"
+
+# lcpo
+lcpo=as.data.frame(`HomoHab_scores.i1_0.i2_-0.25`$delta_lcpo)
+#lcpo$model=c("indep","traditional","model 0","model 1","model 2")
+lcpo=lcpo %>% gather(key = model,value = score, indep:`model 2`)
+lcpo$metric = "lcpo"
+
+# pit overlap
+pit_overlap=as.data.frame(`HomoHab_scores.i1_0.i2_-0.25`$delta_pit_overlap)
+#pit_overlap$model=c("indep","traditional","model 0","model 1","model 2")
+pit_overlap=pit_overlap %>% gather(key = model,value = score, indep:`model 2`)
+pit_overlap$metric = "pit_overlap"
+
+### model selections
+scores=rbind(waic,crps,mae,lcpo,pit_overlap)
+#ggplot(scores,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue") + facet_wrap(~metric) +ylim(0,5)
+
+waic_p = ggplot(waic,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue")  +ylim(0,30) +ggtitle("delta_WAIC")
+crps_p = ggplot(crps,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue")  +ylim(0,0.3) +ggtitle("delta_CRPS")
+lcpo_p = ggplot(lcpo,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue")  +ylim(0,.8)  +ggtitle("delta_LCPO")
+mae_p = ggplot(mae,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue")  +ylim(0,1)  +ggtitle("delta_MAE")
+pit_overlap_p = ggplot(pit_overlap,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue")  +ylim(0,.3)  +ggtitle("delta_PIT OVERLAP")
+grid.arrange(waic_p,crps_p,mae_p,lcpo_p,pit_overlap_p)
+```
+
+### Ranked model selection scores
+```{r homo3, echo=FALSE,warning=F,message=F,fig.width=12}
+scores
+
+
+# waic
+waic=as.data.frame(apply(`HomoHab_scores.i1_0.i2_-0.25`$delta_waic,1,rank))
+waic$model=c("indep","traditional","model 0","model 1","model 2")
+waic=waic %>% gather(key = simulation,value = classification, V1:V10)
+waic$score = "waic"
+
+# crps
+crps=as.data.frame(apply(`HomoHab_scores.i1_0.i2_-0.25`$delta_crps,1,rank))
+crps$model=c("indep","traditional","model 0","model 1","model 2")
+crps=crps %>% gather(key = simulation,value = classification, V1:V10)
+crps$score = "crps"
+
+# mae
+mae=as.data.frame(apply(`HomoHab_scores.i1_0.i2_-0.25`$delta_mae,1,rank))
+mae$model=c("indep","traditional","model 0","model 1","model 2")
+mae=mae %>% gather(key = simulation,value = classification, V1:V10)
+mae$score = "mae"
+
+# lcpo
+lcpo=as.data.frame(apply(`HomoHab_scores.i1_0.i2_-0.25`$delta_lcpo,1,rank))
+lcpo$model=c("indep","traditional","model 0","model 1","model 2")
+lcpo=lcpo %>% gather(key = simulation,value = classification, V1:V10)
+lcpo$score = "lcpo"
+
+# pit overlap
+pit_overlap=as.data.frame(apply(`HomoHab_scores.i1_0.i2_-0.25`$delta_pit_overlap,1,rank))
+pit_overlap$model=c("indep","traditional","model 0","model 1","model 2")
+pit_overlap=pit_overlap %>% gather(key = simulation,value = classification, V1:V10)
+pit_overlap$score = "pit_overlap"
+
+### model selections
+scores=rbind(waic,crps,mae,lcpo,pit_overlap)
+ggplot(scores,aes(x=model,y=classification)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue") + facet_wrap(~score)
+```
+
+
+
+
+## -0.25 and +0.25 {.tabset}
+
+**Observations:**
+
+<!-- - This is a very tricky scenario. Literature is aware that these interactions are not possible to infer using joint models in aggregated data (not sure what would happen with point-pattern data). -->
+
+### Simulated model model
+
+- Sp2 -0.25 effect on Sp1
+- Sp1 +0.25 effect on Sp2
+
+```{r simulation4,echo=F,warning=F,message=F,fig.width=12}
+#### scale of environ similarity
+scale=0.5
+#### interactions
+i1=-0.25
+i2=0.25
+
+## spatial autocor due to proximity
+# also avoid 0 probability locations
+ag1=.1
+ag2=.1
+min.prob = .1
+
+## define the locations:
+from <- 0
+to <- 10
+#to <- 5
+x.seq <- seq(from, to, length=31) 
+y.seq <- seq(from, to, length=31)
+model_J1 <-   RMmatern(nu=1,var=4,scale=20)
+simu_J1 <- RFsimulate(model_J1, x=x.seq, y=y.seq)
+coords = cbind(coordinates(simu_J1)[,1],coordinates(simu_J1)[,2])
+min.dist=max(abs(diff(x.seq)))
+neighbors=sapply(1:nrow(coords),function(x){
+  which(pointDistance(coords[x,],coords,lonlat=F)<(min.dist*2))
+})
+
+model_J2 <-   RMmatern(nu=1,var=2,scale=12)
+  simu_J2 <- RFsimulate(model_J2, x=x.seq, y=y.seq)
+  
+  lon=coordinates(simu_J2)[,1]
+  lat=coordinates(simu_J2)[,2]
+  
+  common = rescale(simu_J2@data$variable1,to=c(0,8))
+  ## sp1
+  effect_common_sp1 = dgamma(common,20,1/(6/18))
+  effect_common_sp1 <- rescale(effect_common_sp1,to=c(-2,2))
+  ##sp2
+  effect_common_sp2 = scale*effect_common_sp1
+  
+  
+  n.cells=length(x.seq)*length(y.seq)
+  mean_sp1_per_loc=20
+  mean_sp2_per_loc=20
+  
+  n.sim=1000
+  
+  n.per.t.sp1=round((n.cells*mean_sp1_per_loc)/n.sim)
+  n.per.t.sp2=round((n.cells*mean_sp2_per_loc)/n.sim)
+  abu_sp1=abu_sp2=rep(0,n.cells)
+  
+  for(t in 1:n.sim){
+    #########
+    ### sp1
+    #########
+
+    ### without covariates
+    prob_sp1 = min.prob + i1*abu_sp2 + sapply(1:nrow(coords),function(x){sum(abu_sp1[neighbors[[x]]]*ag1)})
+    
+    if(sum(prob_sp1)==min.prob*n.cells){prob_sp1=rep(1/n.cells,n.cells)}else{
+      prob_sp1=(prob_sp1-min(prob_sp1)+min.prob);prob_sp1=prob_sp1/sum(prob_sp1) 
+    }
+    
+    idx.1=sample(1:length(prob_sp1),n.per.t.sp1,prob=prob_sp1,replace = T)
+    ind=table(idx.1)
+    cells=as.numeric(names(ind))
+    numbers=as.vector(ind)
+    
+    abu_sp1[cells]=abu_sp1[cells]+numbers
+    
+    ##########
+    ### sp2
+    ##########
+    
+    ### without covariates
+    prob_sp2 = min.prob + i2*abu_sp1 + sapply(1:nrow(coords),function(x){sum(abu_sp2[neighbors[[x]]]*ag2)})
+    
+    if(sum(prob_sp2)==min.prob*n.cells){prob_sp2=rep(1/n.cells,n.cells)}else{
+      prob_sp2=(prob_sp2-min(prob_sp2)+min.prob);prob_sp2=prob_sp2/sum(prob_sp2)
+    }
+    
+    idx.2=sample(1:length(prob_sp2),n.per.t.sp1,prob=prob_sp2,replace = T)
+    ind=table(idx.2)
+    cells=as.numeric(names(ind))
+    numbers=as.vector(ind)
+    
+    abu_sp2[cells]=abu_sp2[cells]+numbers
+  }
+  df.sim=data.frame(sp1=abu_sp1,sp2=abu_sp2,x=coordinates(simu_J2)[,1],
+                    y=coordinates(simu_J2)[,2],common_var=simu_J2$variable1,common_var=simu_J2$variable1)
+  
+  df.sim=data.frame(sp1=abu_sp1,sp2=abu_sp2,
+                    x=coordinates(simu_J2)[,1],
+                    y=coordinates(simu_J2)[,2],
+                    common=simu_J2$variable1,
+                    common_group=inla.group(simu_J2$variable1,n=20))
+  
+  
+        sp1=ggplot(df.sim)+geom_point(aes(x=x,y=y,color=sp1),size=10)+ggtitle("Sp1")
+        sp2=ggplot(df.sim)+geom_point(aes(x=x,y=y,color=sp2),size=10)+ggtitle("Sp2")
+        grid.arrange(sp1,sp2,ncol=2)
+  
+  
+```
+
+### Scaling parameter
+```{r homo4_alpha, echo=FALSE,warning=F,message=F,fig.height=6,fig.width=12}
+## `HomoHab_alpha.i1_0.i2_0`
+alpha = as.data.frame(t(`HomoHab_alpha.i1_0.25.i2_-0.25`$alpha))
+names(alpha)=c("trad 1","trad 2","M_0 C1","M_0 C2","M_1 C1","M_1 C2","M_2 C1","M_2 C2")
+ea=gather(alpha)
+
+sig1=gather(as.data.frame(t(`HomoHab_alpha_sp1_significance.i1_0.25.i2_-0.25`$alpha)))
+sig2=gather(as.data.frame(t(`HomoHab_alpha_sp2_significance.i1_0.25.i2_-0.25`$alpha)))
+sig=rbind(sig1,sig2)
+
+### model selections
+scores=rbind(
+# waic
+apply(t(`HomoHab_scores.i1_0.25.i2_-0.25`$delta_waic),1,function(x){sum(x==0)}),
+
+# crps
+apply(t(`HomoHab_scores.i1_0.25.i2_-0.25`$delta_crps),1,function(x){sum(x==0)}),
+
+# mae
+apply(t(`HomoHab_scores.i1_0.25.i2_-0.25`$delta_mae),1,function(x){sum(x==0)}),
+
+# lcpo
+apply(t(`HomoHab_scores.i1_0.25.i2_-0.25`$delta_lcpo),1,function(x){sum(x==0)}),
+
+# pit overlap
+apply(t(`HomoHab_scores.i1_0.25.i2_-0.25`$delta_pit_overlap),1,function(x){sum(x==0)})
+)
+rownames(scores)=c("waic","crps","mae","lcpo","pit_overlap")
+
+alph = ggplot(ea) +geom_boxplot(aes(x=key,y=value)) +geom_point(aes(x=key,y=value)) + geom_hline(yintercept=0,color="red") + geom_hline(yintercept=1,color="blue") + geom_hline(yintercept=-1,color="blue") +   scale_x_discrete(labels=c("M0 alpha1","M0 alpha2","M1 alpha1","M1 alpha2","M2 alpha1","M2 alpha2","Trad beta1","Trad beta2")) + ggtitle("Scaling parameter alpha_1/alpha_2") 
+signi = ggplot(sig) +geom_boxplot(aes(x=key,y=value)) +geom_point(aes(x=key,y=value)) + ggtitle("Percentile of 0 in Alpha param") + ylim(0,1)
+grid.arrange(alph,signi,ncol=2)
+```
+
+### Scaled model selection scores
+```{r homo4_sc, echo=FALSE,warning=F,message=F,message=F,fig.width=12}
+
+# waic
+scaled_waic=as.data.frame(t(`HomoHab_scores.i1_0.25.i2_-0.25`$scaled_waic))
+scaled_waic$model=c("indep","traditional","model 0","model 1","model 2")
+scaled_waic=scaled_waic %>% gather(key = simulation,value = classification, V1:V10)
+scaled_waic$score = "waic"
+
+# crps
+scaled_crps=as.data.frame(t(`HomoHab_scores.i1_0.25.i2_-0.25`$scaled_crps))
+scaled_crps$model=c("indep","traditional","model 0","model 1","model 2")
+scaled_crps=scaled_crps %>% gather(key = simulation,value = classification, V1:V10)
+scaled_crps$score = "crps"
+
+# mae
+scaled_mae=as.data.frame(t(`HomoHab_scores.i1_0.25.i2_-0.25`$scaled_mae))
+scaled_mae$model=c("indep","traditional","model 0","model 1","model 2")
+scaled_mae=scaled_mae %>% gather(key = simulation,value = classification, V1:V10)
+scaled_mae$score = "mae"
+
+# lcpo
+scaled_lcpo=as.data.frame(t(`HomoHab_scores.i1_0.25.i2_-0.25`$scaled_lcpo))
+scaled_lcpo$model=c("indep","traditional","model 0","model 1","model 2")
+scaled_lcpo=scaled_lcpo %>% gather(key = simulation,value = classification, V1:V10)
+scaled_lcpo$score = "lcpo"
+
+
+# pit overlap
+scaled_pit_overlap=as.data.frame(t(`HomoHab_scores.i1_0.25.i2_-0.25`$scaled_pit_overlap))
+scaled_pit_overlap$model=c("indep","traditional","model 0","model 1","model 2")
+scaled_pit_overlap=scaled_pit_overlap %>% gather(key = simulation,value = classification, V1:V10)
+scaled_pit_overlap$score = "pit_overlap"
+
+
+### model selections
+scaled_scores=rbind(scaled_waic,scaled_crps,scaled_mae,scaled_lcpo,scaled_pit_overlap)
+ggplot(scaled_scores,aes(x=model,y=classification)) + geom_boxplot() + #geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue") +
+  facet_wrap(~score)
+```
+
+### Model selection scores
+```{r homo4_m, echo=FALSE,warning=F,message=F,message=F,fig.width=12,fig.height=8}
+#scores
+
+# waic
+waic=as.data.frame(`HomoHab_scores.i1_0.25.i2_-0.25`$delta_waic)
+#waic$model=c("indep","traditional","model 0","model 1","model 2")
+waic=waic %>% gather(key = model,value = score, indep:`model 2`)
+waic$metric = "waic"
+
+# crps
+crps=as.data.frame(`HomoHab_scores.i1_0.25.i2_-0.25`$delta_crps)
+#crps$model=c("indep","traditional","model 0","model 1","model 2")
+crps=crps %>% gather(key = model,value = score, indep:`model 2`)
+crps$metric = "crps"
+
+# mae
+mae=as.data.frame(`HomoHab_scores.i1_0.25.i2_-0.25`$delta_mae)
+#mae$model=c("indep","traditional","model 0","model 1","model 2")
+mae=mae %>% gather(key = model,value = score, indep:`model 2`)
+mae$metric = "mae"
+
+# lcpo
+lcpo=as.data.frame(`HomoHab_scores.i1_0.25.i2_-0.25`$delta_lcpo)
+#lcpo$model=c("indep","traditional","model 0","model 1","model 2")
+lcpo=lcpo %>% gather(key = model,value = score, indep:`model 2`)
+lcpo$metric = "lcpo"
+
+# pit overlap
+pit_overlap=as.data.frame(`HomoHab_scores.i1_0.25.i2_-0.25`$delta_pit_overlap)
+#pit_overlap$model=c("indep","traditional","model 0","model 1","model 2")
+pit_overlap=pit_overlap %>% gather(key = model,value = score, indep:`model 2`)
+pit_overlap$metric = "pit_overlap"
+
+### model selections
+scores=rbind(waic,crps,mae,lcpo,pit_overlap)
+#ggplot(scores,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue") + facet_wrap(~metric) +ylim(0,5)
+
+waic_p = ggplot(waic,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue")  +ylim(0,5) +ggtitle("delta_WAIC")
+crps_p = ggplot(crps,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue")  +ylim(0,0.1) +ggtitle("delta_CRPS")
+lcpo_p = ggplot(lcpo,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue")  +ylim(0,.8)  +ggtitle("delta_LCPO")
+mae_p = ggplot(mae,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue")  +ylim(0,1)  +ggtitle("delta_MAE")
+pit_overlap_p = ggplot(pit_overlap,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue")  +ylim(0,.2)  +ggtitle("delta_PIT OVERLAP")
+grid.arrange(waic_p,crps_p,mae_p,lcpo_p,pit_overlap_p)
+```
+
+### Ranked model selection scores
+```{r homo4, echo=FALSE,warning=F,message=F,fig.width=12}
+scores
+
+
+# waic
+waic=as.data.frame(apply(`HomoHab_scores.i1_0.25.i2_-0.25`$delta_waic,1,rank))
+waic$model=c("indep","traditional","model 0","model 1","model 2")
+waic=waic %>% gather(key = simulation,value = classification, V1:V10)
+waic$score = "waic"
+
+# crps
+crps=as.data.frame(apply(`HomoHab_scores.i1_0.25.i2_-0.25`$delta_crps,1,rank))
+crps$model=c("indep","traditional","model 0","model 1","model 2")
+crps=crps %>% gather(key = simulation,value = classification, V1:V10)
+crps$score = "crps"
+
+# mae
+mae=as.data.frame(apply(`HomoHab_scores.i1_0.25.i2_-0.25`$delta_mae,1,rank))
+mae$model=c("indep","traditional","model 0","model 1","model 2")
+mae=mae %>% gather(key = simulation,value = classification, V1:V10)
+mae$score = "mae"
+
+# lcpo
+lcpo=as.data.frame(apply(`HomoHab_scores.i1_0.25.i2_-0.25`$delta_lcpo,1,rank))
+lcpo$model=c("indep","traditional","model 0","model 1","model 2")
+lcpo=lcpo %>% gather(key = simulation,value = classification, V1:V10)
+lcpo$score = "lcpo"
+
+# pit overlap
+pit_overlap=as.data.frame(apply(`HomoHab_scores.i1_0.25.i2_-0.25`$delta_pit_overlap,1,rank))
+pit_overlap$model=c("indep","traditional","model 0","model 1","model 2")
+pit_overlap=pit_overlap %>% gather(key = simulation,value = classification, V1:V10)
+pit_overlap$score = "pit_overlap"
+
+### model selections
+scores=rbind(waic,crps,mae,lcpo,pit_overlap)
+ggplot(scores,aes(x=model,y=classification)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue") + facet_wrap(~score)
+```
+
+
+
+
+
+## +0.25 and +0.25 {.tabset}
+
+**Observations:**
+
+<!-- - interactions are positive in all models (they estimate  more or less well) -->
+<!-- - model selection scores: -->
+<!--   - *Model 0* does very bad in WAIC, MAE and CRPS -->
+<!--   - CRPS and MAE best in *independent model* -->
+<!--   - WAIC and LCPO prefer *overparameterized Joint models* -->
+<!--   - PIT prefers *Joint models* -->
+
+### Simulated model model
+
+- Sp2 +0.25 effect on Sp1
+- Sp1 +0.25 effect on Sp2
+
+```{r simulation5,echo=F,warning=F,message=F,fig.width=12}
+#### scale of environ similarity
+scale=0.5
+#### interactions
+i1=0.25
+i2=0.25
+
+## spatial autocor due to proximity
+# also avoid 0 probability locations
+ag1=.1
+ag2=.1
+min.prob = .1
+
+## define the locations:
+from <- 0
+to <- 10
+#to <- 5
+x.seq <- seq(from, to, length=31) 
+y.seq <- seq(from, to, length=31)
+model_J1 <-   RMmatern(nu=1,var=4,scale=20)
+simu_J1 <- RFsimulate(model_J1, x=x.seq, y=y.seq)
+coords = cbind(coordinates(simu_J1)[,1],coordinates(simu_J1)[,2])
+min.dist=max(abs(diff(x.seq)))
+neighbors=sapply(1:nrow(coords),function(x){
+  which(pointDistance(coords[x,],coords,lonlat=F)<(min.dist*2))
+})
+
+model_J2 <-   RMmatern(nu=1,var=2,scale=12)
+  simu_J2 <- RFsimulate(model_J2, x=x.seq, y=y.seq)
+  
+  lon=coordinates(simu_J2)[,1]
+  lat=coordinates(simu_J2)[,2]
+  
+  common = rescale(simu_J2@data$variable1,to=c(0,8))
+  ## sp1
+  effect_common_sp1 = dgamma(common,20,1/(6/18))
+  effect_common_sp1 <- rescale(effect_common_sp1,to=c(-2,2))
+  ##sp2
+  effect_common_sp2 = scale*effect_common_sp1
+  
+  
+  n.cells=length(x.seq)*length(y.seq)
+  mean_sp1_per_loc=20
+  mean_sp2_per_loc=20
+  
+  n.sim=1000
+  
+  n.per.t.sp1=round((n.cells*mean_sp1_per_loc)/n.sim)
+  n.per.t.sp2=round((n.cells*mean_sp2_per_loc)/n.sim)
+  abu_sp1=abu_sp2=rep(0,n.cells)
+  
+  for(t in 1:n.sim){
+    #########
+    ### sp1
+    #########
+
+    ### without covariates
+    prob_sp1 = min.prob + i1*abu_sp2 + sapply(1:nrow(coords),function(x){sum(abu_sp1[neighbors[[x]]]*ag1)})
+    
+    if(sum(prob_sp1)==min.prob*n.cells){prob_sp1=rep(1/n.cells,n.cells)}else{
+      prob_sp1=(prob_sp1-min(prob_sp1)+min.prob);prob_sp1=prob_sp1/sum(prob_sp1) 
+    }
+    
+    idx.1=sample(1:length(prob_sp1),n.per.t.sp1,prob=prob_sp1,replace = T)
+    ind=table(idx.1)
+    cells=as.numeric(names(ind))
+    numbers=as.vector(ind)
+    
+    abu_sp1[cells]=abu_sp1[cells]+numbers
+    
+    ##########
+    ### sp2
+    ##########
+    
+    ### without covariates
+    prob_sp2 = min.prob + i2*abu_sp1 + sapply(1:nrow(coords),function(x){sum(abu_sp2[neighbors[[x]]]*ag2)})
+    
+    if(sum(prob_sp2)==min.prob*n.cells){prob_sp2=rep(1/n.cells,n.cells)}else{
+      prob_sp2=(prob_sp2-min(prob_sp2)+min.prob);prob_sp2=prob_sp2/sum(prob_sp2)
+    }
+    
+    idx.2=sample(1:length(prob_sp2),n.per.t.sp1,prob=prob_sp2,replace = T)
+    ind=table(idx.2)
+    cells=as.numeric(names(ind))
+    numbers=as.vector(ind)
+    
+    abu_sp2[cells]=abu_sp2[cells]+numbers
+  }
+  df.sim=data.frame(sp1=abu_sp1,sp2=abu_sp2,x=coordinates(simu_J2)[,1],
+                    y=coordinates(simu_J2)[,2],common_var=simu_J2$variable1,common_var=simu_J2$variable1)
+  
+  df.sim=data.frame(sp1=abu_sp1,sp2=abu_sp2,
+                    x=coordinates(simu_J2)[,1],
+                    y=coordinates(simu_J2)[,2],
+                    common=simu_J2$variable1,
+                    common_group=inla.group(simu_J2$variable1,n=20))
+  
+  
+        sp1=ggplot(df.sim)+geom_point(aes(x=x,y=y,color=sp1),size=10)+ggtitle("Sp1")
+        sp2=ggplot(df.sim)+geom_point(aes(x=x,y=y,color=sp2),size=10)+ggtitle("Sp2")
+        grid.arrange(sp1,sp2,ncol=2)
+  
+  
+```
+
+### Scaling parameter
+```{r homo5_alpha, echo=FALSE,warning=F,message=F,fig.height=6,fig.width=12}
+## `HomoHab_alpha.i1_0.i2_0`
+alpha = as.data.frame(t(`HomoHab_alpha.i1_0.25.i2_0.25`$alpha))
+names(alpha)=c("trad 1","trad 2","M_0 C1","M_0 C2","M_1 C1","M_1 C2","M_2 C1","M_2 C2")
+ea=gather(alpha)
+
+sig1=gather(as.data.frame(t(`HomoHab_alpha_sp1_significance.i1_0.25.i2_0.25`$alpha)))
+sig2=gather(as.data.frame(t(`HomoHab_alpha_sp2_significance.i1_0.25.i2_0.25`$alpha)))
+sig=rbind(sig1,sig2)
+
+### model selections
+scores=rbind(
+# waic
+apply(t(`HomoHab_scores.i1_0.25.i2_0.25`$delta_waic),1,function(x){sum(x==0)}),
+
+# crps
+apply(t(`HomoHab_scores.i1_0.25.i2_0.25`$delta_crps),1,function(x){sum(x==0)}),
+
+# mae
+apply(t(`HomoHab_scores.i1_0.25.i2_0.25`$delta_mae),1,function(x){sum(x==0)}),
+
+# lcpo
+apply(t(`HomoHab_scores.i1_0.25.i2_0.25`$delta_lcpo),1,function(x){sum(x==0)}),
+
+# pit overlap
+apply(t(`HomoHab_scores.i1_0.25.i2_0.25`$delta_pit_overlap),1,function(x){sum(x==0)})
+)
+rownames(scores)=c("waic","crps","mae","lcpo","pit_overlap")
+
+alph = ggplot(ea) +geom_boxplot(aes(x=key,y=value)) +geom_point(aes(x=key,y=value)) + geom_hline(yintercept=0,color="red") + geom_hline(yintercept=1,color="blue") + geom_hline(yintercept=-1,color="blue") +   scale_x_discrete(labels=c("M0 alpha1","M0 alpha2","M1 alpha1","M1 alpha2","M2 alpha1","M2 alpha2","Trad beta1","Trad beta2")) + ggtitle("Scaling parameter alpha_1/alpha_2") 
+signi = ggplot(sig) +geom_boxplot(aes(x=key,y=value)) +geom_point(aes(x=key,y=value)) + ggtitle("Percentile of 0 in Alpha param") + ylim(0,1)
+grid.arrange(alph,signi,ncol=2)
+```
+
+### Scaled model selection scores
+```{r homo5_sc, echo=FALSE,warning=F,message=F,message=F,fig.width=12}
+
+# waic
+scaled_waic=as.data.frame(t(`HomoHab_scores.i1_0.25.i2_0.25`$scaled_waic))
+scaled_waic$model=c("indep","traditional","model 0","model 1","model 2")
+scaled_waic=scaled_waic %>% gather(key = simulation,value = classification, V1:V10)
+scaled_waic$score = "waic"
+
+# crps
+scaled_crps=as.data.frame(t(`HomoHab_scores.i1_0.25.i2_0.25`$scaled_crps))
+scaled_crps$model=c("indep","traditional","model 0","model 1","model 2")
+scaled_crps=scaled_crps %>% gather(key = simulation,value = classification, V1:V10)
+scaled_crps$score = "crps"
+
+# mae
+scaled_mae=as.data.frame(t(`HomoHab_scores.i1_0.25.i2_0.25`$scaled_mae))
+scaled_mae$model=c("indep","traditional","model 0","model 1","model 2")
+scaled_mae=scaled_mae %>% gather(key = simulation,value = classification, V1:V10)
+scaled_mae$score = "mae"
+
+# lcpo
+scaled_lcpo=as.data.frame(t(`HomoHab_scores.i1_0.25.i2_0.25`$scaled_lcpo))
+scaled_lcpo$model=c("indep","traditional","model 0","model 1","model 2")
+scaled_lcpo=scaled_lcpo %>% gather(key = simulation,value = classification, V1:V10)
+scaled_lcpo$score = "lcpo"
+
+
+# pit overlap
+scaled_pit_overlap=as.data.frame(t(`HomoHab_scores.i1_0.25.i2_0.25`$scaled_pit_overlap))
+scaled_pit_overlap$model=c("indep","traditional","model 0","model 1","model 2")
+scaled_pit_overlap=scaled_pit_overlap %>% gather(key = simulation,value = classification, V1:V10)
+scaled_pit_overlap$score = "pit_overlap"
+
+
+### model selections
+scaled_scores=rbind(scaled_waic,scaled_crps,scaled_mae,scaled_lcpo,scaled_pit_overlap)
+ggplot(scaled_scores,aes(x=model,y=classification)) + geom_boxplot() + #geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue") +
+  facet_wrap(~score)
+```
+
+### Model selection scores
+```{r homo5_m, echo=FALSE,warning=F,message=F,message=F,fig.width=12,fig.height=8}
+#scores
+
+# waic
+waic=as.data.frame(`HomoHab_scores.i1_0.25.i2_0.25`$delta_waic)
+#waic$model=c("indep","traditional","model 0","model 1","model 2")
+waic=waic %>% gather(key = model,value = score, indep:`model 2`)
+waic$metric = "waic"
+
+# crps
+crps=as.data.frame(`HomoHab_scores.i1_0.25.i2_0.25`$delta_crps)
+#crps$model=c("indep","traditional","model 0","model 1","model 2")
+crps=crps %>% gather(key = model,value = score, indep:`model 2`)
+crps$metric = "crps"
+
+# mae
+mae=as.data.frame(`HomoHab_scores.i1_0.25.i2_0.25`$delta_mae)
+#mae$model=c("indep","traditional","model 0","model 1","model 2")
+mae=mae %>% gather(key = model,value = score, indep:`model 2`)
+mae$metric = "mae"
+
+# lcpo
+lcpo=as.data.frame(`HomoHab_scores.i1_0.25.i2_0.25`$delta_lcpo)
+#lcpo$model=c("indep","traditional","model 0","model 1","model 2")
+lcpo=lcpo %>% gather(key = model,value = score, indep:`model 2`)
+lcpo$metric = "lcpo"
+
+# pit overlap
+pit_overlap=as.data.frame(`HomoHab_scores.i1_0.25.i2_0.25`$delta_pit_overlap)
+#pit_overlap$model=c("indep","traditional","model 0","model 1","model 2")
+pit_overlap=pit_overlap %>% gather(key = model,value = score, indep:`model 2`)
+pit_overlap$metric = "pit_overlap"
+
+### model selections
+scores=rbind(waic,crps,mae,lcpo,pit_overlap)
+#ggplot(scores,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue") + facet_wrap(~metric) +ylim(0,5)
+
+waic_p = ggplot(waic,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue")  +ylim(0,80) +ggtitle("delta_WAIC")
+crps_p = ggplot(crps,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue")  +ylim(0,1) +ggtitle("delta_CRPS")
+lcpo_p = ggplot(lcpo,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue")  +ylim(0,2.5)  +ggtitle("delta_LCPO")
+mae_p = ggplot(mae,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue")  +ylim(0,1)  +ggtitle("delta_MAE")
+pit_overlap_p = ggplot(pit_overlap,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue")  +ylim(0,.5)  +ggtitle("delta_PIT OVERLAP")
+grid.arrange(waic_p,crps_p,mae_p,lcpo_p,pit_overlap_p)
+```
+
+### Ranked model selection scores
+```{r homo5, echo=FALSE,warning=F,message=F,fig.width=12}
+#scores
+
+
+# waic
+waic=as.data.frame(apply(`HomoHab_scores.i1_0.25.i2_0.25`$delta_waic,1,rank))
+waic$model=c("indep","traditional","model 0","model 1","model 2")
+waic=waic %>% gather(key = simulation,value = classification, V1:V10)
+waic$score = "waic"
+
+# crps
+crps=as.data.frame(apply(`HomoHab_scores.i1_0.25.i2_0.25`$delta_crps,1,rank))
+crps$model=c("indep","traditional","model 0","model 1","model 2")
+crps=crps %>% gather(key = simulation,value = classification, V1:V10)
+crps$score = "crps"
+
+# mae
+mae=as.data.frame(apply(`HomoHab_scores.i1_0.25.i2_0.25`$delta_mae,1,rank))
+mae$model=c("indep","traditional","model 0","model 1","model 2")
+mae=mae %>% gather(key = simulation,value = classification, V1:V10)
+mae$score = "mae"
+
+# lcpo
+lcpo=as.data.frame(apply(`HomoHab_scores.i1_0.25.i2_0.25`$delta_lcpo,1,rank))
+lcpo$model=c("indep","traditional","model 0","model 1","model 2")
+lcpo=lcpo %>% gather(key = simulation,value = classification, V1:V10)
+lcpo$score = "lcpo"
+
+# pit overlap
+pit_overlap=as.data.frame(apply(`HomoHab_scores.i1_0.25.i2_0.25`$delta_pit_overlap,1,rank))
+pit_overlap$model=c("indep","traditional","model 0","model 1","model 2")
+pit_overlap=pit_overlap %>% gather(key = simulation,value = classification, V1:V10)
+pit_overlap$score = "pit_overlap"
+
+### model selections
+scores=rbind(waic,crps,mae,lcpo,pit_overlap)
+ggplot(scores,aes(x=model,y=classification)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue") + facet_wrap(~score)
+```
+
+
+
+
+## -0.25 and -0.25 {.tabset}
+
+**Obsercations:**
+
+- interactions are negative in all models (they all estimate more or less well)
+- model selection scores:
+  - *Model 0* does very bad in WAIC, MAE and CRPS
+  - MAE and CRPS best in *independent model*
+  - traditional interaction model does best in WAIC and LCPO
+
+### Simulated model model
+
+- Sp2 -0.25 effect on Sp1
+- Sp1 -0.25 effect on Sp2
+
+```{r simulation6,echo=F,warning=F,message=F,fig.width=12}
+#### scale of environ similarity
+scale=0.5
+#### interactions
+i1=-0.25
+i2=-0.25
+
+## spatial autocor due to proximity
+# also avoid 0 probability locations
+ag1=.1
+ag2=.1
+min.prob = .1
+
+## define the locations:
+from <- 0
+to <- 10
+#to <- 5
+x.seq <- seq(from, to, length=31) 
+y.seq <- seq(from, to, length=31)
+model_J1 <-   RMmatern(nu=1,var=4,scale=20)
+simu_J1 <- RFsimulate(model_J1, x=x.seq, y=y.seq)
+coords = cbind(coordinates(simu_J1)[,1],coordinates(simu_J1)[,2])
+min.dist=max(abs(diff(x.seq)))
+neighbors=sapply(1:nrow(coords),function(x){
+  which(pointDistance(coords[x,],coords,lonlat=F)<(min.dist*2))
+})
+
+model_J2 <-   RMmatern(nu=1,var=2,scale=12)
+  simu_J2 <- RFsimulate(model_J2, x=x.seq, y=y.seq)
+  
+  lon=coordinates(simu_J2)[,1]
+  lat=coordinates(simu_J2)[,2]
+  
+  common = rescale(simu_J2@data$variable1,to=c(0,8))
+  ## sp1
+  effect_common_sp1 = dgamma(common,20,1/(6/18))
+  effect_common_sp1 <- rescale(effect_common_sp1,to=c(-2,2))
+  ##sp2
+  effect_common_sp2 = scale*effect_common_sp1
+  
+  
+  n.cells=length(x.seq)*length(y.seq)
+  mean_sp1_per_loc=20
+  mean_sp2_per_loc=20
+  
+  n.sim=1000
+  
+  n.per.t.sp1=round((n.cells*mean_sp1_per_loc)/n.sim)
+  n.per.t.sp2=round((n.cells*mean_sp2_per_loc)/n.sim)
+  abu_sp1=abu_sp2=rep(0,n.cells)
+  
+  for(t in 1:n.sim){
+    #########
+    ### sp1
+    #########
+
+    ### without covariates
+    prob_sp1 = min.prob + i1*abu_sp2 + sapply(1:nrow(coords),function(x){sum(abu_sp1[neighbors[[x]]]*ag1)})
+    
+    if(sum(prob_sp1)==min.prob*n.cells){prob_sp1=rep(1/n.cells,n.cells)}else{
+      prob_sp1=(prob_sp1-min(prob_sp1)+min.prob);prob_sp1=prob_sp1/sum(prob_sp1) 
+    }
+    
+    idx.1=sample(1:length(prob_sp1),n.per.t.sp1,prob=prob_sp1,replace = T)
+    ind=table(idx.1)
+    cells=as.numeric(names(ind))
+    numbers=as.vector(ind)
+    
+    abu_sp1[cells]=abu_sp1[cells]+numbers
+    
+    ##########
+    ### sp2
+    ##########
+    
+    ### without covariates
+    prob_sp2 = min.prob + i2*abu_sp1 + sapply(1:nrow(coords),function(x){sum(abu_sp2[neighbors[[x]]]*ag2)})
+    
+    if(sum(prob_sp2)==min.prob*n.cells){prob_sp2=rep(1/n.cells,n.cells)}else{
+      prob_sp2=(prob_sp2-min(prob_sp2)+min.prob);prob_sp2=prob_sp2/sum(prob_sp2)
+    }
+    
+    idx.2=sample(1:length(prob_sp2),n.per.t.sp1,prob=prob_sp2,replace = T)
+    ind=table(idx.2)
+    cells=as.numeric(names(ind))
+    numbers=as.vector(ind)
+    
+    abu_sp2[cells]=abu_sp2[cells]+numbers
+  }
+  df.sim=data.frame(sp1=abu_sp1,sp2=abu_sp2,x=coordinates(simu_J2)[,1],
+                    y=coordinates(simu_J2)[,2],common_var=simu_J2$variable1,common_var=simu_J2$variable1)
+  
+  df.sim=data.frame(sp1=abu_sp1,sp2=abu_sp2,
+                    x=coordinates(simu_J2)[,1],
+                    y=coordinates(simu_J2)[,2],
+                    common=simu_J2$variable1,
+                    common_group=inla.group(simu_J2$variable1,n=20))
+  
+  
+        sp1=ggplot(df.sim)+geom_point(aes(x=x,y=y,color=sp1),size=10)+ggtitle("Sp1")
+        sp2=ggplot(df.sim)+geom_point(aes(x=x,y=y,color=sp2),size=10)+ggtitle("Sp2")
+        grid.arrange(sp1,sp2,ncol=2)
+  
+  
+```
+
+### Scaling parameter
+```{r homo6_alpha, echo=FALSE,warning=F,message=F,fig.height=6,fig.width=12}
+## `HomoHab_alpha.i1_0.i2_0`
+alpha = as.data.frame(t(`HomoHab_alpha.i1_-0.25.i2_-0.25`$alpha))
+names(alpha)=c("trad 1","trad 2","M_0 C1","M_0 C2","M_1 C1","M_1 C2","M_2 C1","M_2 C2")
+ea=gather(alpha)
+
+sig1=gather(as.data.frame(t(`HomoHab_alpha_sp1_significance.i1_-0.25.i2_-0.25`$alpha)))
+sig2=gather(as.data.frame(t(`HomoHab_alpha_sp2_significance.i1_-0.25.i2_-0.25`$alpha)))
+sig=rbind(sig1,sig2)
+
+### model selections
+scores=rbind(
+# waic
+apply(t(`HomoHab_scores.i1_-0.25.i2_-0.25`$delta_waic),1,function(x){sum(x==0)}),
+
+# crps
+apply(t(`HomoHab_scores.i1_-0.25.i2_-0.25`$delta_crps),1,function(x){sum(x==0)}),
+
+# mae
+apply(t(`HomoHab_scores.i1_-0.25.i2_-0.25`$delta_mae),1,function(x){sum(x==0)}),
+
+# lcpo
+apply(t(`HomoHab_scores.i1_-0.25.i2_-0.25`$delta_lcpo),1,function(x){sum(x==0)}),
+
+# pit overlap
+apply(t(`HomoHab_scores.i1_-0.25.i2_-0.25`$delta_pit_overlap),1,function(x){sum(x==0)})
+)
+rownames(scores)=c("waic","crps","mae","lcpo","pit_overlap")
+
+alph = ggplot(ea) +geom_boxplot(aes(x=key,y=value)) +geom_point(aes(x=key,y=value)) + geom_hline(yintercept=0,color="red") + geom_hline(yintercept=1,color="blue") + geom_hline(yintercept=-1,color="blue") +   scale_x_discrete(labels=c("M0 alpha1","M0 alpha2","M1 alpha1","M1 alpha2","M2 alpha1","M2 alpha2","Trad beta1","Trad beta2")) + ggtitle("Scaling parameter alpha_1/alpha_2") 
+signi = ggplot(sig) +geom_boxplot(aes(x=key,y=value)) +geom_point(aes(x=key,y=value)) + ggtitle("Percentile of 0 in Alpha param") + ylim(0,1)
+grid.arrange(alph,signi,ncol=2)
+```
+
+### Scaled model selection scores
+```{r homo6_sc, echo=FALSE,warning=F,message=F,message=F,fig.width=12}
+
+# waic
+scaled_waic=as.data.frame(t(`HomoHab_scores.i1_-0.25.i2_-0.25`$scaled_waic))
+scaled_waic$model=c("indep","traditional","model 0","model 1","model 2")
+scaled_waic=scaled_waic %>% gather(key = simulation,value = classification, V1:V10)
+scaled_waic$score = "waic"
+
+# crps
+scaled_crps=as.data.frame(t(`HomoHab_scores.i1_-0.25.i2_-0.25`$scaled_crps))
+scaled_crps$model=c("indep","traditional","model 0","model 1","model 2")
+scaled_crps=scaled_crps %>% gather(key = simulation,value = classification, V1:V10)
+scaled_crps$score = "crps"
+
+# mae
+scaled_mae=as.data.frame(t(`HomoHab_scores.i1_-0.25.i2_-0.25`$scaled_mae))
+scaled_mae$model=c("indep","traditional","model 0","model 1","model 2")
+scaled_mae=scaled_mae %>% gather(key = simulation,value = classification, V1:V10)
+scaled_mae$score = "mae"
+
+# lcpo
+scaled_lcpo=as.data.frame(t(`HomoHab_scores.i1_-0.25.i2_-0.25`$scaled_lcpo))
+scaled_lcpo$model=c("indep","traditional","model 0","model 1","model 2")
+scaled_lcpo=scaled_lcpo %>% gather(key = simulation,value = classification, V1:V10)
+scaled_lcpo$score = "lcpo"
+
+
+# pit overlap
+scaled_pit_overlap=as.data.frame(t(`HomoHab_scores.i1_-0.25.i2_-0.25`$scaled_pit_overlap))
+scaled_pit_overlap$model=c("indep","traditional","model 0","model 1","model 2")
+scaled_pit_overlap=scaled_pit_overlap %>% gather(key = simulation,value = classification, V1:V10)
+scaled_pit_overlap$score = "pit_overlap"
+
+
+### model selections
+scaled_scores=rbind(scaled_waic,scaled_crps,scaled_mae,scaled_lcpo,scaled_pit_overlap)
+ggplot(scaled_scores,aes(x=model,y=classification)) + geom_boxplot() + #geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue") +
+  facet_wrap(~score)
+```
+
+### Model selection scores
+```{r homo6_m, echo=FALSE,warning=F,message=F,message=F,fig.width=12,fig.height=8}
+#scores
+
+# waic
+waic=as.data.frame(`HomoHab_scores.i1_-0.25.i2_-0.25`$delta_waic)
+#waic$model=c("indep","traditional","model 0","model 1","model 2")
+waic=waic %>% gather(key = model,value = score, indep:`model 2`)
+waic$metric = "waic"
+
+# crps
+crps=as.data.frame(`HomoHab_scores.i1_-0.25.i2_-0.25`$delta_crps)
+#crps$model=c("indep","traditional","model 0","model 1","model 2")
+crps=crps %>% gather(key = model,value = score, indep:`model 2`)
+crps$metric = "crps"
+
+# mae
+mae=as.data.frame(`HomoHab_scores.i1_-0.25.i2_-0.25`$delta_mae)
+#mae$model=c("indep","traditional","model 0","model 1","model 2")
+mae=mae %>% gather(key = model,value = score, indep:`model 2`)
+mae$metric = "mae"
+
+# lcpo
+lcpo=as.data.frame(`HomoHab_scores.i1_-0.25.i2_-0.25`$delta_lcpo)
+#lcpo$model=c("indep","traditional","model 0","model 1","model 2")
+lcpo=lcpo %>% gather(key = model,value = score, indep:`model 2`)
+lcpo$metric = "lcpo"
+
+# pit overlap
+pit_overlap=as.data.frame(`HomoHab_scores.i1_-0.25.i2_-0.25`$delta_pit_overlap)
+#pit_overlap$model=c("indep","traditional","model 0","model 1","model 2")
+pit_overlap=pit_overlap %>% gather(key = model,value = score, indep:`model 2`)
+pit_overlap$metric = "pit_overlap"
+
+### model selections
+scores=rbind(waic,crps,mae,lcpo,pit_overlap)
+#ggplot(scores,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue") + facet_wrap(~metric) +ylim(0,5)
+
+waic_p = ggplot(waic,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue")  +ylim(0,50) +ggtitle("delta_WAIC")
+crps_p = ggplot(crps,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue")  +ylim(0,1) +ggtitle("delta_CRPS")
+lcpo_p = ggplot(lcpo,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue")  +ylim(0,2.5)  +ggtitle("delta_LCPO")
+mae_p = ggplot(mae,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue")  +ylim(0,1)  +ggtitle("delta_MAE")
+pit_overlap_p = ggplot(pit_overlap,aes(x=model,y=score)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue")  +ylim(0,.5)  +ggtitle("delta_PIT OVERLAP")
+grid.arrange(waic_p,crps_p,mae_p,lcpo_p,pit_overlap_p)
+```
+
+### Ranked model selection scores
+```{r homo6, echo=FALSE,warning=F,message=F,fig.width=12}
+scores
+
+
+# waic
+waic=as.data.frame(apply(`HomoHab_scores.i1_-0.25.i2_-0.25`$delta_waic,1,rank))
+waic$model=c("indep","traditional","model 0","model 1","model 2")
+waic=waic %>% gather(key = simulation,value = classification, V1:V10)
+waic$score = "waic"
+
+# crps
+crps=as.data.frame(apply(`HomoHab_scores.i1_-0.25.i2_-0.25`$delta_crps,1,rank))
+crps$model=c("indep","traditional","model 0","model 1","model 2")
+crps=crps %>% gather(key = simulation,value = classification, V1:V10)
+crps$score = "crps"
+
+# mae
+mae=as.data.frame(apply(`HomoHab_scores.i1_-0.25.i2_-0.25`$delta_mae,1,rank))
+mae$model=c("indep","traditional","model 0","model 1","model 2")
+mae=mae %>% gather(key = simulation,value = classification, V1:V10)
+mae$score = "mae"
+
+# lcpo
+lcpo=as.data.frame(apply(`HomoHab_scores.i1_-0.25.i2_-0.25`$delta_lcpo,1,rank))
+lcpo$model=c("indep","traditional","model 0","model 1","model 2")
+lcpo=lcpo %>% gather(key = simulation,value = classification, V1:V10)
+lcpo$score = "lcpo"
+
+# pit overlap
+pit_overlap=as.data.frame(apply(`HomoHab_scores.i1_-0.25.i2_-0.25`$delta_pit_overlap,1,rank))
+pit_overlap$model=c("indep","traditional","model 0","model 1","model 2")
+pit_overlap=pit_overlap %>% gather(key = simulation,value = classification, V1:V10)
+pit_overlap$score = "pit_overlap"
+
+### model selections
+scores=rbind(waic,crps,mae,lcpo,pit_overlap)
+ggplot(scores,aes(x=model,y=classification)) + geom_boxplot() + geom_dotplot(binaxis='y', stackdir='center', dotsize=.81,col="blue") + facet_wrap(~score)
+```
+
+
+
+
